@@ -938,3 +938,19 @@ APK 直链：http://192.168.0.113:8790/NovaChat-1.1.8-android-arm64-lan.apk
 - `/v1/models` 返回 HTTP 200，共 13 个已发布模型，包含 `gpt-image-2`。
 - 发送中文“生成一张简单的蓝天白云插画，画面干净，不要文字”时，网关返回 HTTP 200，实际响应模型为 `gpt-image-2`，返回 1 个 PNG 图片附件。
 - 该附件通过带鉴权的 `/v1/files/<id>` 读取返回 HTTP 200，PNG 文件签名正确；说明自动生图和图片回传链路已在网关端闭环验证。
+
+
+### 2026-09-02：生成中追问、图片续作与上下文修复
+
+用户反馈：回答生成期间无法继续发送；生成照片后说“[Image #1]”“这张不满意”“我要全身的”等要求仍被当作普通文本；历史图片和上下文记忆不稳定。
+
+本轮修改：
+
+- 移动端 Composer 在回答生成期间不再锁定输入；有新文本或附件时发送按钮优先发送新请求，输入为空时才显示停止。
+- ChatScreen 按 `requestId` 保存多个活动生成任务，同一对话可并行发送追问；delta、完成、取消和错误都按原对话及 assistant message ID 写回。
+- 完成的图片助手消息（包括无文字、只有图片附件的消息）会进入客户端和协议层上下文裁剪；未完成的图片消息仍会排除。
+- 网关识别“生照片”、自然语言生图和图片修改意图；存在历史图片时，“不满意、改成全身、换背景、再来一张”等追问自动调用 `/images/generations`。图片 prompt 会带上原始创作要求、之前修改和本次修改。
+- 普通视觉问题会将历史助手图片转换为 `input_image`/`image_url` 输入，不再把非法 `attachments` 字段放到 assistant 消息中；失效的历史图片引用会被忽略，不阻断普通文本请求。
+- 当前图片续作采用跨服务商兼容的文字重建方式，尚未统一使用 multipart `/images/edits`，因此具体保真度仍取决于图片服务商。
+
+验证结果（2026-09-02）：`npm run typecheck --workspaces --if-present`、`npm run test --workspaces --if-present`（Mobile 7 个测试文件 / 22 项测试，Gateway 6 个测试文件 / 40 项测试）、`npm run lint --workspaces --if-present`、`npm run build` 和 `npm run verify` 均通过。未重新构建 APK。

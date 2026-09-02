@@ -61,7 +61,7 @@ Gateway
 移动端不再使用全局单一 generation。它维护：
 
 ```text
-Map<conversationId, ActiveGeneration>
+Map<requestId, ActiveGeneration>
 ```
 
 每个 `ActiveGeneration` 包含独立的：
@@ -74,7 +74,8 @@ Map<conversationId, ActiveGeneration>
 结果：
 
 - A 对话生成时可以切换到 B 并继续发送；
-- Stop 只取消当前对话；
+- A 对话上一条回答生成时，也可以继续发送下一条请求；
+- Stop 取消当前对话的所有活动请求；
 - 后台 delta 只写入原对话；
 - 删除对话会取消对应后台请求；
 - 旧请求的完成回调不能误删同一对话中新请求的状态。
@@ -107,11 +108,12 @@ server: ready, started, delta, done, cancelled, error, pong
 
 - 只纳入用户消息和状态为 `complete` 的助手消息；
 - `streaming`、`error`、`cancelled` 助手消息不进入下一轮；
+- 完成的图片助手消息即使没有文字也会作为图片上下文保留；
 - 消息附件引用随历史保留；
 - 从最近消息向前截取，受本地预算和服务端 `MAX_HISTORY_CHARS` 双重限制；
 - 当前用户消息只插入一次，不会在重试/附件上传期间串到别的对话。
 
-这避免了半截模型输出、错误提示和取消内容污染后续上下文。
+这避免了半截模型输出、错误提示和取消内容污染后续上下文。普通视觉问题会把历史助手图片转换为兼容的图片输入；带有“不满意、改成、换背景、全身”等可执行修改意图的图片追问则自动走图片生成路由，并携带原始创作要求与修改链。当前为跨服务商兼容，使用 `/images/generations` 的文字重建方式，而不是假定所有服务商都支持统一的 `/images/edits`。
 
 ## 7. 模型身份
 

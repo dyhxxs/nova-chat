@@ -51,9 +51,12 @@ export function chatMessageCost(message: Pick<ChatMessage, 'content' | 'attachme
 }
 
 /**
- * Retains the newest complete message window without ever returning an
- * assistant-only prefix. The newest message is retained even if it is larger
- * than the budget so a single large user prompt remains sendable.
+ * Retains the newest complete message window without returning an ordinary
+ * assistant-only prefix. A completed assistant image is the exception: it is
+ * useful conversation metadata for image continuations and vision questions,
+ * so it must survive trimming even when the preceding user prompt was cropped.
+ * The newest message is retained even if it is larger than the budget so a
+ * single large user prompt remains sendable.
  */
 export function trimChatMessages(
   messages: readonly ChatMessage[],
@@ -72,7 +75,10 @@ export function trimChatMessages(
     cost += nextCost;
   }
   selected.reverse();
-  while (selected[0]?.role === 'assistant') selected.shift();
+  while (
+    selected[0]?.role === 'assistant'
+    && !selected[0].attachments.some((attachment) => attachment.kind === 'image')
+  ) selected.shift();
   return selected;
 }
 

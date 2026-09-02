@@ -192,25 +192,54 @@ function imageGenerationIntent(request: GenerateRequest): boolean {
   return editCue.test(latestUserMessage) && (!asksForExplanation.test(latestUserMessage) || actionableEditCue.test(latestUserMessage));
 }
 
+function previousImageAssistantIndex(messages: GenerateRequest['messages'], beforeIndex: number): number {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === 'assistant' && message.attachments.some((attachment) => attachment.kind === 'image')) return index;
+  }
+  return -1;
+}
+
+function previousUserIndex(messages: GenerateRequest['messages'], beforeIndex: number): number {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') return index;
+  }
+  return -1;
+}
+
 function imagePrompt(request: GenerateRequest): string {
-  const userIndexes = request.messages
+  const latestIndex = [...request.messages]
     .map((message, index) => message.role === 'user' ? index : -1)
-    .filter((index) => index >= 0);
-  const latestIndex = userIndexes.at(-1) ?? -1;
+    .filter((index) => index >= 0)
+    .at(-1) ?? -1;
   const latest = latestIndex >= 0 ? request.messages[latestIndex]?.content.trim() ?? '' : '';
   if (latestIndex < 0) return latest;
 
-  const hasPriorGeneratedImage = request.messages
-    .slice(0, latestIndex)
-    .some((message) => message.role === 'assistant' && message.attachments.some((attachment) => attachment.kind === 'image'));
-  if (!hasPriorGeneratedImage) return latest;
-  const previousUser = [...request.messages.slice(0, latestIndex)].reverse().find((message) => message.role === 'user')?.content.trim() ?? '';
-  if (!previousUser) return latest;
+  const promptChain: string[] = [];
+  let beforeIndex = latestIndex;
+  while (true) {
+    const imageIndex = previousImageAssistantIndex(request.messages, beforeIndex);
+    if (imageIndex < 0) break;
+    const userIndex = previousUserIndex(request.messages, imageIndex);
+    if (userIndex < 0) break;
+    const prompt = request.messages[userIndex]?.content.trim() ?? '';
+    if (prompt) promptChain.unshift(prompt);
+    beforeIndex = userIndex;
+  }
+  if (!promptChain.length) return latest;
 
   // The generic image-generation endpoint does not have a portable image-edit
-  // contract across OpenAI-compatible providers. Carry the previous textual
-  // brief forward so a continuation still preserves the subject and style.
-  return `基于上一版图片继续创作。\n原始创作要求：${previousUser.slice(0, 4_000)}\n本次修改要求：${latest}`;
+  // contract across OpenAI-compatible providers. Carry the whole textual brief
+  // forward so a sequence such as “生成照片” → “我要全身的” → “换背景” does
+  // not forget the original subject after the second image turn.
+  const original = promptChain[0]!.slice(0, 4_000);
+  const priorChanges = promptChain.slice(1).map((prompt, index) => `修改${index + 1}：${prompt.slice(0, 2_000)}`);
+  return [
+    '基于上一版图片继续创作。',
+    `原始创作要求：${original}`,
+    ...priorChanges,
+    `本次修改要求：${latest.slice(0, 4_000)}`,
+  ].join('\n');
 }
 
 function resolveAllowedModel(settings: ProviderSettings, requestedModel: string): string {
@@ -554,11 +583,21 @@ export class ModelProvider {
   ) {
     const input: any[] = [];
     for (const message of request.messages) {
-      // Generated assistant attachments are conversation metadata. They are
-      // not valid input attachments for a text Responses turn; image
-      // continuation requests are handled by generateImage above.
       if (message.role === 'assistant') {
         if (message.content.trim()) input.push({ role: 'assistant', content: message.content });
+        const imageContent: any[] = [];
+        for (const attachment of message.attachments) {
+          if (attachment.kind !== 'image') continue;
+          try {
+            const file = await this.fileForUser(attachment.id, userId);
+            if (file.stored.kind === 'image') imageContent.push({ type: 'input_image', image_url: file.dataUrl });
+          } catch {
+            // A stale local reference should not make a later text turn fail.
+            // Image continuations are routed before this body is built; for a
+            // normal vision question, use the image only when it is available.
+          }
+        }
+        if (imageContent.length) input.push({ role: 'user', content: imageContent });
         continue;
       }
       if (!message.attachments.length) {
@@ -598,6 +637,17 @@ export class ModelProvider {
     for (const message of request.messages) {
       if (message.role === 'assistant') {
         if (message.content.trim()) messages.push({ role: 'assistant', content: message.content });
+        const imageContent: any[] = [];
+        for (const attachment of message.attachments) {
+          if (attachment.kind !== 'image') continue;
+          try {
+            const file = await this.fileForUser(attachment.id, userId);
+            if (file.stored.kind === 'image') imageContent.push({ type: 'image_url', image_url: { url: file.dataUrl } });
+          } catch {
+            // Ignore stale generated-image references for ordinary text turns.
+          }
+        }
+        if (imageContent.length) messages.push({ role: 'user', content: imageContent });
         continue;
       }
       if (!message.attachments.length) {

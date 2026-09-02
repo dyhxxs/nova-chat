@@ -32,7 +32,13 @@ export function buildConversationContext(
     cost += nextCost;
   }
   selected.reverse();
-  while (selected[0]?.role === 'assistant') selected.shift();
+  // Keep a leading completed image-only assistant message as metadata. It
+  // may be the only surviving reference to the previous generated image when
+  // the older user prompt was removed by the history budget.
+  while (
+    selected[0]?.role === 'assistant'
+    && !selected[0].attachments.some((attachment) => attachment.kind === 'image')
+  ) selected.shift();
   return selected.map((message) => ({
     role: message.role,
     content: message.content,

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -44,7 +44,7 @@ async function imageProvider() {
   const database = new AppDatabase(config);
   databases.push(database);
   const user = database.createUser({ email: 'image-test@example.local', password: 'test-password', displayName: 'Image Test' });
-  return { provider: new ModelProvider(config, database), userId: user.id };
+  return { provider: new ModelProvider(config, database), userId: user.id, database };
 }
 
 function request(overrides: Partial<GenerateRequest['options']> = {}): GenerateRequest {
@@ -226,6 +226,82 @@ describe('ModelProvider compatibility', () => {
     );
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/responses');
+  });
+
+
+  it('routes image follow-ups with an image reference to the image model and carries the prompt chain', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+    const previousImage = { id: '00000000-0000-4000-8000-000000000010', name: 'generated.png', mimeType: 'image/png', size: 100, kind: 'image' as const };
+    const result = await modelProvider.generate(
+      {
+        ...request({ model: 'gpt-5.6-sol' }),
+        messages: [
+          { role: 'user', content: '生成一张人物照片，室外自然光', attachments: [] },
+          { role: 'assistant', content: '', attachments: [previousImage] },
+          { role: 'user', content: '我不满意，改成全身的 [Image #1]', attachments: [] },
+        ],
+      },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/images/generations');
+    expect(requestBody(fetchMock, 0).model).toBe('gpt-image-2');
+    expect(requestBody(fetchMock, 0).prompt).toContain('原始创作要求：生成一张人物照片，室外自然光');
+    expect(requestBody(fetchMock, 0).prompt).toContain('本次修改要求：我不满意，改成全身的 [Image #1]');
+    expect(result).toMatchObject({ model: 'gpt-image-2', attachments: [{ kind: 'image' }] });
+  });
+
+  it('includes a completed assistant image in normal vision questions without sending an invalid assistant attachment', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'resp-vision', output_text: '这是一张插画。' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId, database } = await imageProvider();
+    const imagePath = path.join(database.uploadsDir, 'vision.png');
+    await writeFile(imagePath, png);
+    database.createFile({
+      id: '00000000-0000-4000-8000-000000000011',
+      userId,
+      name: 'vision.png',
+      mimeType: 'image/png',
+      size: png.length,
+      kind: 'image',
+      storagePath: imagePath,
+    });
+
+    await modelProvider.generate(
+      {
+        ...request({ model: 'gpt-5.6-sol' }),
+        messages: [
+          { role: 'user', content: '生成一张蓝天白云插画', attachments: [] },
+          { role: 'assistant', content: '', attachments: [{ id: '00000000-0000-4000-8000-000000000011', name: 'vision.png', mimeType: 'image/png', size: png.length, kind: 'image' }] },
+          { role: 'user', content: '这张图是什么风格？', attachments: [] },
+        ],
+      },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/responses');
+    const body = requestBody(fetchMock, 0);
+    expect(body.input).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'user',
+        content: expect.arrayContaining([
+          expect.objectContaining({ type: 'input_image', image_url: expect.stringContaining('data:image/png;base64,') }),
+        ]),
+      }),
+    ]));
+    expect(body.input).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', attachments: expect.anything() }),
+    ]));
   });
 
   it('retries image generation without response_format when the provider rejects that optional field', async () => {

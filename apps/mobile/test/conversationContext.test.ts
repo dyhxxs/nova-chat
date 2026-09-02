@@ -31,4 +31,32 @@ describe('buildConversationContext', () => {
     expect(result).toHaveLength(1);
     expect(result[0]?.attachments).toEqual([attachment]);
   });
+
+
+  it('keeps a completed image-only assistant message when the older prompt is trimmed', () => {
+    const image = { id: '00000000-0000-4000-8000-000000000002', name: 'generated.png', mimeType: 'image/png', size: 100, kind: 'image' as const };
+    const result = buildConversationContext([
+      message({ id: 'u1', role: 'user', content: '生成一个很长的初始创作描述'.repeat(30), status: 'complete' }),
+      message({ id: 'a1', role: 'assistant', content: '', status: 'complete', attachments: [image] }),
+      message({ id: 'u2', role: 'user', content: '我不满意，改成全身的 [Image #1]', status: 'complete' }),
+    ], 'pending', 2_200);
+
+    expect(result.map((item) => item.role)).toEqual(['assistant', 'user']);
+    expect(result[0]?.attachments).toEqual([image]);
+    expect(result[1]?.content).toContain('全身');
+  });
+
+  it('does not retain unfinished image assistant messages', () => {
+    const image = { id: '00000000-0000-4000-8000-000000000003', name: 'partial.png', mimeType: 'image/png', size: 100, kind: 'image' as const };
+    const result = buildConversationContext([
+      message({ id: 'u1', role: 'user', content: '生成图片', status: 'complete' }),
+      message({ id: 'a1', role: 'assistant', content: '', status: 'streaming', attachments: [image] }),
+      message({ id: 'u2', role: 'user', content: '换个背景', status: 'complete' }),
+    ], 'pending');
+
+    expect(result).toEqual([
+      { role: 'user', content: '生成图片', attachments: [] },
+      { role: 'user', content: '换个背景', attachments: [] },
+    ]);
+  });
 });

@@ -161,10 +161,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     schedulePersistence(get());
   },
 
-  beginTurn: (content, attachments = []) => {
+  beginTurn: (content, attachments = [], targetConversationId) => {
     const now = Date.now();
     const assistantMessageId = createId();
-    let conversationId = get().activeConversationId;
+    let conversationId = targetConversationId ?? get().activeConversationId;
     if (!get().conversations.some((item) => item.id === conversationId)) conversationId = get().newConversation();
     const cleaned = content.trim();
     const userMessage: AppMessage = { id: createId(), role: 'user', content: cleaned, attachments, createdAt: now, status: 'complete' };
