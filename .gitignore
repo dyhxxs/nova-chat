@@ -27,3 +27,6 @@ artifacts/*
 *.jks
 *.p12
 *.pem
+
+# Temporary local GitHub credential handoff (never commit)
+.gh-token.txt
