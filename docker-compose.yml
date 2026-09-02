@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    env_file:
+      - services/gateway/.env
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - nova-chat-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  nova-chat-data:

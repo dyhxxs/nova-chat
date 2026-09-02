@@ -1,0 +1,29 @@
+node_modules/
+.expo/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+apps/mobile/android/
+apps/mobile/ios/
+.run/
+artifacts/*
+!artifacts/.gitkeep
+
+# Local runtime data and user uploads (never commit)
+**/data/
+**/data-lan/
+**/*.sqlite
+**/*.sqlite-*
+**/*.db
+**/*.db-*
+**/uploads/
+
+# Local credentials and signing material
+*.keystore
+*.jks
+*.p12
+*.pem

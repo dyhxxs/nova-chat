@@ -1,0 +1,308 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { GenerateRequest } from '@nova-chat/protocol';
+import { loadConfig } from '../src/config.js';
+import { AppDatabase } from '../src/database.js';
+import { ModelProvider } from '../src/provider.js';
+
+const databases: AppDatabase[] = [];
+const temporaryDirectories: string[] = [];
+
+async function provider() {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'nova-chat-provider-test-'));
+  temporaryDirectories.push(dataDir);
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    DATA_DIR: dataDir,
+    SERVER_MASTER_KEY: 'provider-test-master-key-with-more-than-thirty-two-characters',
+    OPENAI_API_KEY: 'provider-test-key',
+    OPENAI_BASE_URL: 'https://provider.example/v1',
+    OPENAI_MODEL: 'gpt-5.6-sol',
+    ALLOWED_MODELS: 'gpt-5.6-sol,gpt-5.6-terra',
+    PROVIDER_API_MODE: 'responses',
+  });
+  const database = new AppDatabase(config);
+  databases.push(database);
+  return new ModelProvider(config, database);
+}
+
+async function imageProvider() {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'nova-chat-image-provider-test-'));
+  temporaryDirectories.push(dataDir);
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    DATA_DIR: dataDir,
+    SERVER_MASTER_KEY: 'provider-test-master-key-with-more-than-thirty-two-characters',
+    OPENAI_API_KEY: 'provider-test-key',
+    OPENAI_BASE_URL: 'https://provider.example/v1',
+    OPENAI_MODEL: 'gpt-image-1',
+    ALLOWED_MODELS: 'gpt-image-1,gpt-image-2',
+    PROVIDER_API_MODE: 'responses',
+  });
+  const database = new AppDatabase(config);
+  databases.push(database);
+  const user = database.createUser({ email: 'image-test@example.local', password: 'test-password', displayName: 'Image Test' });
+  return { provider: new ModelProvider(config, database), userId: user.id };
+}
+
+function request(overrides: Partial<GenerateRequest['options']> = {}): GenerateRequest {
+  return {
+    requestId: '11111111-1111-4111-8111-111111111111',
+    conversationId: '22222222-2222-4222-8222-222222222222',
+    deviceId: 'provider-test-device',
+    messages: [{ role: 'user', content: 'hello', attachments: [] }],
+    options: {
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'medium',
+      verbosity: 'medium',
+      instructions: '',
+      maxOutputTokens: 4096,
+      webSearch: false,
+      codeInterpreter: false,
+      ...overrides,
+    },
+  };
+}
+
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+}
+
+function requestBody(fetchMock: ReturnType<typeof vi.fn>, index: number): any {
+  return JSON.parse(String((fetchMock.mock.calls[index]?.[1] as RequestInit | undefined)?.body ?? '{}'));
+}
+
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  while (databases.length) databases.pop()?.close();
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('ModelProvider compatibility', () => {
+  it('falls back stale client model IDs to the administrator default and reports the actual model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'resp-1', output_text: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+    const deltas: string[] = [];
+
+    const result = await modelProvider.generate(
+      request({ model: 'gpt-5.6' }),
+      { id: 'user-1' },
+      new AbortController().signal,
+      (delta) => deltas.push(delta),
+    );
+
+    expect(result).toMatchObject({ text: 'ok', model: 'gpt-5.6-sol', responseId: 'resp-1' });
+    expect(deltas).toEqual(['ok']);
+    expect(requestBody(fetchMock, 0).model).toBe('gpt-5.6-sol');
+    expect(requestBody(fetchMock, 0).instructions).toContain('gpt-5.6-sol');
+  });
+
+  it('removes an unsupported code interpreter and retries once without duplicating output', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'invalid_request_error', message: 'Unsupported tool type: code_interpreter' } }, 400))
+      .mockResolvedValueOnce(jsonResponse({ id: 'resp-2', output_text: 'compatible answer' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+    const deltas: string[] = [];
+
+    const result = await modelProvider.generate(
+      request({ webSearch: true, codeInterpreter: true }),
+      { id: 'user-2' },
+      new AbortController().signal,
+      (delta) => deltas.push(delta),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBody(fetchMock, 0).tools).toEqual([
+      { type: 'web_search' },
+      { type: 'code_interpreter', container: { type: 'auto' } },
+    ]);
+    expect(requestBody(fetchMock, 1).tools).toEqual([{ type: 'web_search' }]);
+    expect(deltas).toEqual(['compatible answer']);
+    expect(result).toMatchObject({ text: 'compatible answer', model: 'gpt-5.6-sol' });
+  });
+
+  it('removes all requested tools for a generic unsupported-tool response', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'invalid_request_error', message: 'Unsupported tool type' } }, 400))
+      .mockResolvedValueOnce(jsonResponse({ id: 'resp-3', output_text: 'plain answer' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+
+    await modelProvider.generate(
+      request({ webSearch: true, codeInterpreter: true }),
+      { id: 'user-3' },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBody(fetchMock, 1)).not.toHaveProperty('tools');
+  });
+
+  it('does not retry after any streamed output has already reached the client', async () => {
+    const stream = [
+      'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"invalid_request_error","message":"Unsupported tool type: code_interpreter"}}}\n\n',
+    ].join('');
+    const fetchMock = vi.fn().mockResolvedValue(new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+    const deltas: string[] = [];
+
+    await expect(modelProvider.generate(
+      request({ codeInterpreter: true }),
+      { id: 'user-4' },
+      new AbortController().signal,
+      (delta) => deltas.push(delta),
+    )).rejects.toMatchObject({ code: 'provider_tool_unsupported' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(deltas).toEqual(['partial']);
+  });
+
+  it('routes image intent to /images/generations and stores the returned image', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+    const result = await modelProvider.generate(
+      { ...request({ model: 'gpt-image-1' }), messages: [{ role: 'user', content: '生成一张猫的图片', attachments: [] }] },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/images/generations');
+    expect(requestBody(fetchMock, 0)).toMatchObject({ model: 'gpt-image-1', prompt: '生成一张猫的图片', n: 1 });
+    expect(result).toMatchObject({ model: 'gpt-image-1', text: '', attachments: [{ mimeType: 'image/png', kind: 'image' }] });
+  });
+
+  it.each([
+    '生成照片',
+    '帮我生成一张照片',
+    '做一个头像',
+    '给我做一张壁纸',
+    '生照片',
+    '不要文字，生成一张照片',
+  ])('automatically routes Chinese photo requests (%s) to the image model', async (prompt) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+    const result = await modelProvider.generate(
+      { ...request({ model: 'gpt-5.6-sol' }), messages: [{ role: 'user', content: prompt, attachments: [] }] },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/images/generations');
+    expect(requestBody(fetchMock, 0)).toMatchObject({ model: 'gpt-image-2', prompt, n: 1 });
+    expect(result).toMatchObject({ model: 'gpt-image-2', attachments: [{ mimeType: 'image/png', kind: 'image' }] });
+  });
+
+  it.each([
+    '不要生成图片',
+    '为什么不能生成照片',
+    '怎么生成头像',
+  ])('keeps negative or explanatory image wording on the text route (%s)', async (prompt) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'resp-text', output_text: '文字回答' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+    await modelProvider.generate(
+      { ...request({ model: 'gpt-5.6-sol' }), messages: [{ role: 'user', content: prompt, attachments: [] }] },
+      { id: 'user-image-negative' },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/responses');
+  });
+
+  it('retries image generation without response_format when the provider rejects that optional field', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'invalid_request_error', message: 'response_format is not supported' } }, 400))
+      .mockResolvedValueOnce(new Response(png, { status: 200, headers: { 'content-type': 'image/png' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+
+    const result = await modelProvider.generate(
+      { ...request({ model: 'gpt-image-1' }), messages: [{ role: 'user', content: '画一张海报', attachments: [] }] },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBody(fetchMock, 0)).toHaveProperty('response_format', 'b64_json');
+    expect(requestBody(fetchMock, 1)).not.toHaveProperty('response_format');
+    expect(result).toMatchObject({ model: 'gpt-image-1', attachments: [{ mimeType: 'image/png', kind: 'image', size: png.length }] });
+  });
+
+  it('falls back to another configured image model when image generation is unavailable', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'model_not_found', message: 'model not found' } }, 404))
+      .mockResolvedValueOnce(jsonResponse({ data: [{ base64: 'aGVsbG8=', mime_type: 'image/png' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+    const result = await modelProvider.generate(
+      { ...request({ model: 'gpt-image-1' }), messages: [{ role: 'user', content: '画一张海报', attachments: [] }] },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBody(fetchMock, 0).model).toBe('gpt-image-1');
+    expect(requestBody(fetchMock, 1).model).toBe('gpt-image-2');
+    expect(result.model).toBe('gpt-image-2');
+  });
+
+  it('falls back to another configured text model when the provider is temporarily unavailable', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ error: { code: 'server_error', message: 'temporary failure' } }, 503))
+      .mockResolvedValueOnce(jsonResponse({ id: 'resp-fallback', output_text: '备用模型已响应' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+    const result = await modelProvider.generate(
+      request(),
+      { id: 'user-text-fallback' },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBody(fetchMock, 0).model).toBe('gpt-5.6-sol');
+    expect(requestBody(fetchMock, 1).model).toBe('gpt-5.6-terra');
+    expect(result).toMatchObject({ model: 'gpt-5.6-terra', text: '备用模型已响应' });
+  });
+
+  it('turns provider pricing errors into an actionable Chinese administrator message', async () => {
+    const fetchMock = vi.fn().mockImplementation(() => jsonResponse({
+      error: { code: 'invalid_request_error', message: 'Model gpt-5.6 has not been priced by the administrator yet.' },
+    }, 400));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+
+    await expect(modelProvider.generate(
+      request(),
+      { id: 'user-5' },
+      new AbortController().signal,
+      () => undefined,
+    )).rejects.toMatchObject({
+      code: 'provider_model_unpriced',
+      message: expect.stringContaining('管理员配置的模型'),
+    });
+  });
+});
+
