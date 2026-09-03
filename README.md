@@ -1,4 +1,4 @@
-# Nova Chat 1.1.3
+# Nova Chat 1.1.11
 
 Nova Chat 是一个自托管、多用户、第三方 OpenAI-compatible 模型移动客户端。项目包含 Android/iOS Expo 应用和一个安全网关。普通用户只需要网关地址、账号和密码；第三方 API Base URL、API Key、协议和允许使用的模型由管理员在 App 内统一配置。
 

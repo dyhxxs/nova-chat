@@ -135,6 +135,7 @@ Fastify 日志会脱敏 Authorization、密码、初始化口令、服务商 API
 - 签名验证结果；
 - 官方下载域名；
 - 更新说明。
+- Android 覆盖安装包必须递增 `versionCode`；LAN 测试包使用独立 `.lan` 包名后缀，只允许在可信私有 Wi-Fi 上使用明文 HTTP。
 
 ## 12. 漏洞报告
 
