@@ -39,10 +39,6 @@ const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'imag
 
 const reasoningLabels: Record<string, string> = { none: '无', low: '低', medium: '中', high: '高', xhigh: '极高', max: '极高' };
 
-function isImageModelId(model: string | undefined): boolean {
-  return /^gpt-image(?:[-.]|$)/i.test(model?.trim() ?? '');
-}
-
 function imageMimeType(uri: string, provided?: string | null): string {
   const normalized = provided?.toLowerCase().trim();
   if (normalized) return normalized === 'image/jpg' ? 'image/jpeg' : normalized;
@@ -73,6 +69,7 @@ export function ChatScreen({ navigation }: Props) {
   // Keep one controller per request rather than one per conversation. This
   // lets a user send a follow-up while an earlier answer is still streaming.
   const activeGenerations = useRef(new Map<string, ActiveGeneration>());
+  const modelCatalogRequest = useRef(0);
   const [pendingByConversation, setPendingByConversation] = useState<Record<string, PendingAttachment[]>>({});
   const [uploadingConversations, setUploadingConversations] = useState<Set<string>>(() => new Set());
   const [uploadStatesByConversation, setUploadStatesByConversation] = useState<Record<string, Record<string, AttachmentUploadState>>>({});
@@ -96,28 +93,48 @@ export function ChatScreen({ navigation }: Props) {
   const setConnectionStatus = useAppStore((state) => state.setConnectionStatus);
   const updateSettings = useAppStore((state) => state.updateSettings);
 
-  useEffect(() => {
-    let cancelled = false;
-    const currentModel = settings.model.trim();
-    const keepCurrentModel = () => {
-      if (!cancelled) setAvailableModels(currentModel ? [currentModel] : []);
+  const refreshAvailableModels = useCallback(async () => {
+    const requestSequence = ++modelCatalogRequest.current;
+    const currentState = useAppStore.getState();
+    const serverUrl = currentState.settings.serverUrl.trim();
+    const token = currentState.accessToken;
+    const keepKnownModels = () => {
+      if (modelCatalogRequest.current !== requestSequence) return;
+      setAvailableModels((current) => {
+        if (current.length) return current;
+        const currentModel = useAppStore.getState().settings.model.trim();
+        return currentModel ? [currentModel] : [];
+      });
     };
 
-    if (!accessToken || !settings.serverUrl.trim()) {
-      keepCurrentModel();
-      return () => { cancelled = true; };
+    if (!token || !serverUrl) {
+      keepKnownModels();
+      return;
     }
-    void fetchGatewayModels(settings.serverUrl, accessToken)
-      .then((result) => {
-        if (cancelled) return;
-        const models = [...new Set(result.models.map((model) => model.trim()).filter(Boolean))];
-        const selectedModel = selectGatewayModel(useAppStore.getState().settings.model, models, result.defaultModel);
-        setAvailableModels(models.length ? models : (selectedModel ? [selectedModel] : []));
-        if (selectedModel !== useAppStore.getState().settings.model) updateSettings({ model: selectedModel });
-      })
-      .catch(keepCurrentModel);
-    return () => { cancelled = true; };
-  }, [accessToken, settings.model, settings.serverUrl, updateSettings]);
+    try {
+      const result = await fetchGatewayModels(serverUrl, token);
+      if (modelCatalogRequest.current !== requestSequence) return;
+      const models = [...new Set(result.models.map((model) => model.trim()).filter(Boolean))];
+      const latestModel = useAppStore.getState().settings.model;
+      const selectedModel = selectGatewayModel(latestModel, models, result.defaultModel);
+      setAvailableModels(models.length ? models : (selectedModel ? [selectedModel] : []));
+      if (selectedModel !== latestModel) updateSettings({ model: selectedModel });
+    } catch {
+      keepKnownModels();
+    }
+  }, [updateSettings]);
+
+  useEffect(() => {
+    const currentModel = useAppStore.getState().settings.model.trim();
+    setAvailableModels(currentModel ? [currentModel] : []);
+    void refreshAvailableModels();
+    return () => { modelCatalogRequest.current += 1; };
+  }, [accessToken, refreshAvailableModels, settings.serverUrl]);
+
+  const openOptions = useCallback(() => {
+    setOptionsVisible(true);
+    void refreshAvailableModels();
+  }, [refreshAvailableModels]);
 
   const conversation = useMemo(
     () => conversations.find((item) => item.id === activeConversationId) ?? conversations[0],
@@ -179,7 +196,7 @@ export function ChatScreen({ navigation }: Props) {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="打开对话设置"
-          onPress={() => setOptionsVisible(true)}
+          onPress={openOptions}
           style={styles.headerTitleButton}
         >
           <View style={styles.headerTitle}>
@@ -197,12 +214,14 @@ export function ChatScreen({ navigation }: Props) {
         </View>
       ),
     });
-  }, [navigation, newConversation, settings.model, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary]);
+  }, [navigation, newConversation, openOptions, settings.model, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary]);
 
   const runGeneration = useCallback((conversationId: string, assistantMessageId: string): boolean => {
     const currentState = useAppStore.getState();
     const currentConversation = currentState.conversations.find((item) => item.id === conversationId);
-    if (!currentConversation) return false;
+    const assistantMessage = currentConversation?.messages.find((item) => item.id === assistantMessageId);
+    if (!currentConversation || assistantMessage?.role !== 'assistant' || assistantMessage.status !== 'streaming') return false;
+    if ([...activeGenerations.current.values()].some((item) => item.messageId === assistantMessageId)) return false;
     const context = buildConversationContext(currentConversation.messages, assistantMessageId);
     if (!context.length) {
       failAssistant(conversationId, assistantMessageId, '没有可发送的消息内容。', false);
@@ -210,6 +229,7 @@ export function ChatScreen({ navigation }: Props) {
     }
 
     const currentSettings = currentState.settings;
+    const requestedModel = assistantMessage.requestedModel?.trim() || currentSettings.model.trim() || DEFAULT_MODEL_ID;
     const requestId = createId();
     const request: GenerateRequest = {
       requestId,
@@ -217,7 +237,7 @@ export function ChatScreen({ navigation }: Props) {
       deviceId: currentState.deviceId,
       messages: context,
       options: {
-        model: currentSettings.model.trim() || DEFAULT_MODEL_ID,
+        model: requestedModel,
         reasoningEffort: currentSettings.reasoningEffort,
         verbosity: currentSettings.verbosity,
         instructions: currentSettings.instructions,
@@ -244,14 +264,11 @@ export function ChatScreen({ navigation }: Props) {
           if (isVisibleConversation(conversationId) && autoFollow.current) scrollToBottom(false);
         },
         onDone: (details) => {
-          // A text model can internally route an image request to gpt-image-*.
-          // Do not replace the user's selected conversation model with that
-          // implementation detail.
-          if (details.model && !isImageModelId(request.options.model) && !isImageModelId(details.model)
-            && details.model !== useAppStore.getState().settings.model) {
-            updateSettings({ model: details.model });
-          }
-          completeAssistant(conversationId, assistantMessageId, details.usage, details.attachments);
+          completeAssistant(conversationId, assistantMessageId, {
+            model: details.model,
+            usage: details.usage,
+            attachments: details.attachments,
+          });
           removeActiveGeneration(conversationId, requestId);
           setConnectionStatus('online');
           if (isVisibleConversation(conversationId)) {
@@ -276,7 +293,7 @@ export function ChatScreen({ navigation }: Props) {
     });
     activeGenerations.current.set(requestId, { controller, requestId, conversationId, messageId: assistantMessageId });
     return true;
-  }, [appendDelta, availableModels, cancelAssistant, completeAssistant, failAssistant, isVisibleConversation, removeActiveGeneration, replaceAssistantContent, scrollToBottom, setConnectionStatus, updateSettings]);
+  }, [appendDelta, availableModels, cancelAssistant, completeAssistant, failAssistant, isVisibleConversation, removeActiveGeneration, replaceAssistantContent, scrollToBottom, setConnectionStatus]);
 
   const addPendingAttachments = useCallback((conversationId: string, additions: PendingAttachment[]) => {
     setPendingByConversation((current) => {
@@ -433,12 +450,13 @@ export function ChatScreen({ navigation }: Props) {
         return next;
       });
       autoFollow.current = true;
-      const turn = beginTurn(text, uploaded, conversationId);
+      const turn = beginTurn(text, uploaded, conversationId, currentSettings.model);
       if (isVisibleConversation(turn.conversationId)) scrollToBottom(false);
       if (!runGeneration(turn.conversationId, turn.assistantMessageId)) {
-        failAssistant(turn.conversationId, turn.assistantMessageId, '当前对话已有回复正在生成。', true);
-        return false;
+        failAssistant(turn.conversationId, turn.assistantMessageId, '无法启动生成请求，请点击重新生成。', true);
       }
+      // The turn is already stored in history, so clear the composer even if
+      // generation could not be started. This avoids sending the same input twice.
       return true;
     } catch (error) {
       const message = error instanceof AttachmentUploadFailure
@@ -468,9 +486,11 @@ export function ChatScreen({ navigation }: Props) {
   }, [cancelAssistant, conversation, removeActiveGeneration]);
 
   const regenerate = useCallback((messageId: string) => {
-    if (!conversation) return;
-    if (prepareRegeneration(conversation.id, messageId)) runGeneration(conversation.id, messageId);
-  }, [conversation, prepareRegeneration, runGeneration]);
+    if (!conversation || !prepareRegeneration(conversation.id, messageId)) return;
+    if (!runGeneration(conversation.id, messageId)) {
+      failAssistant(conversation.id, messageId, '无法启动生成请求，请稍后重试。', true);
+    }
+  }, [conversation, failAssistant, prepareRegeneration, runGeneration]);
 
   useEffect(() => () => {
     for (const active of activeGenerations.current.values()) active.controller.cancel();
@@ -479,9 +499,10 @@ export function ChatScreen({ navigation }: Props) {
   }, [clearScrollTimers]);
 
   useEffect(() => {
-    const existing = new Set(conversations.map((item) => item.id));
     for (const [requestId, active] of activeGenerations.current) {
-      if (!existing.has(active.conversationId)) {
+      const activeConversation = conversations.find((item) => item.id === active.conversationId);
+      const activeMessage = activeConversation?.messages.find((item) => item.id === active.messageId);
+      if (!activeConversation || activeMessage?.status !== 'streaming') {
         active.controller.cancel();
         activeGenerations.current.delete(requestId);
       }
@@ -512,7 +533,7 @@ export function ChatScreen({ navigation }: Props) {
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="打开模型和对话设置"
-        onPress={() => setOptionsVisible(true)}
+        onPress={openOptions}
         style={({ pressed }) => [styles.optionsBar, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }, pressed && { opacity: 0.78 }]}
       >
         <View style={styles.optionsMain}>

@@ -54,10 +54,10 @@ type AppState = {
   hydrate: () => Promise<void>;
   newConversation: () => string;
   setActiveConversation: (id: string) => void;
-  beginTurn: (content: string, attachments?: AttachmentRef[], targetConversationId?: string) => { conversationId: string; assistantMessageId: string };
+  beginTurn: (content: string, attachments?: AttachmentRef[], targetConversationId?: string, requestedModel?: string) => { conversationId: string; assistantMessageId: string };
   appendAssistantDelta: (conversationId: string, messageId: string, delta: string) => void;
   replaceAssistantContent: (conversationId: string, messageId: string, content: string) => void;
-  completeAssistant: (conversationId: string, messageId: string, usage?: TokenUsage, attachments?: GeneratedAttachment[]) => void;
+  completeAssistant: (conversationId: string, messageId: string, completion?: { model?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[] }) => void;
   failAssistant: (conversationId: string, messageId: string, message: string, retryable: boolean) => void;
   cancelAssistant: (conversationId: string, messageId: string) => void;
   prepareRegeneration: (conversationId: string, messageId: string) => boolean;
@@ -161,14 +161,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     schedulePersistence(get());
   },
 
-  beginTurn: (content, attachments = [], targetConversationId) => {
+  beginTurn: (content, attachments = [], targetConversationId, requestedModel) => {
     const now = Date.now();
     const assistantMessageId = createId();
     let conversationId = targetConversationId ?? get().activeConversationId;
     if (!get().conversations.some((item) => item.id === conversationId)) conversationId = get().newConversation();
     const cleaned = content.trim();
     const userMessage: AppMessage = { id: createId(), role: 'user', content: cleaned, attachments, createdAt: now, status: 'complete' };
-    const assistantMessage: AppMessage = { id: assistantMessageId, role: 'assistant', content: '', attachments: [], createdAt: now + 1, status: 'streaming' };
+    const assistantMessage: AppMessage = {
+      id: assistantMessageId,
+      role: 'assistant',
+      content: '',
+      attachments: [],
+      createdAt: now + 1,
+      status: 'streaming',
+      requestedModel: requestedModel?.trim() || get().settings.model.trim() || DEFAULT_MODEL_ID,
+    };
     set((state) => ({
       conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
         ...conversation,
@@ -203,12 +211,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     schedulePersistence(get());
   },
 
-  completeAssistant: (conversationId, messageId, usage, attachments = []) => {
+  completeAssistant: (conversationId, messageId, completion = {}) => {
+    const model = completion.model?.trim() || undefined;
     set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
       ...conversation,
       updatedAt: Date.now(),
       messages: conversation.messages.map((message) => message.id === messageId && message.status === 'streaming'
-        ? { ...message, status: 'complete', usage, attachments }
+        ? { ...message, status: 'complete', usage: completion.usage, attachments: completion.attachments ?? [], model }
         : message),
     } : conversation) }));
     schedulePersistence(get(), true);
@@ -239,11 +248,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     const conversation = get().conversations.find((item) => item.id === conversationId);
     const index = conversation?.messages.findIndex((item) => item.id === messageId) ?? -1;
     if (!conversation || index < 1 || conversation.messages[index]?.role !== 'assistant') return false;
+    if (conversation.messages[index]?.status === 'streaming') return false;
+    const requestedModel = get().settings.model.trim() || DEFAULT_MODEL_ID;
     set((state) => ({ conversations: state.conversations.map((item) => item.id === conversationId ? {
       ...item,
       updatedAt: Date.now(),
       messages: item.messages.slice(0, index + 1).map((message, messageIndex) => messageIndex === index ? {
-        ...message, content: '', attachments: [], status: 'streaming' as const, errorMessage: undefined, retryable: undefined, usage: undefined,
+        ...message,
+        content: '',
+        attachments: [],
+        status: 'streaming' as const,
+        errorMessage: undefined,
+        retryable: undefined,
+        usage: undefined,
+        requestedModel,
+        model: undefined,
       } : message),
     } : item) }));
     schedulePersistence(get(), true);

@@ -80,10 +80,12 @@ async function requestJson<T>(
   if (externalSignal?.aborted) controller.abort();
   else externalSignal?.addEventListener('abort', forwardAbort, { once: true });
   try {
+    const hasBody = init.body !== undefined && init.body !== null;
+    const isFormData = hasBody && init.body instanceof FormData;
     const response = await fetch(toRestUrl(base, route), {
       ...init,
       headers: {
-        ...(init.body instanceof FormData ? {} : { 'content-type': 'application/json' }),
+        ...(hasBody && !isFormData ? { 'content-type': 'application/json' } : {}),
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
         ...(headers ?? {}),
       },

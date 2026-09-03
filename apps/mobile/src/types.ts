@@ -42,6 +42,10 @@ export type AppMessage = {
   errorMessage?: string;
   retryable?: boolean;
   usage?: TokenUsage;
+  /** Model selected when this turn was sent. It remains fixed if settings change mid-generation. */
+  requestedModel?: string;
+  /** Model that actually produced the response, including gateway fallbacks or image routing. */
+  model?: string;
 };
 
 export type Conversation = {
