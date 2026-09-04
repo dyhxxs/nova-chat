@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ThemedTextInput as TextInput } from '../components/ThemedText';
+import { ThemedText as Text } from '../components/ThemedText';
 import { Ionicons } from '@expo/vector-icons';
 import { KeyboardAwareView } from '../components/KeyboardAwareView';
 import { useAppTheme } from '../hooks/useAppTheme';
@@ -91,8 +93,11 @@ export function LoginScreen() {
       } catch {
         // Authentication succeeded; the gateway also performs a safe server-side model fallback.
       }
+      await setSession(result.accessToken, result.user, normalized);
+      // setSession resets account-scoped local state when the account changes.
+      // Apply the login target/model after that reset so a previous account's
+      // settings cannot leak into the newly authenticated account.
       updateSettings({ serverUrl: normalized, model });
-      await setSession(result.accessToken, result.user);
     } catch (error) {
       const text = error instanceof GatewayApiError ? error.message : error instanceof Error ? error.message : '登录失败。';
       setMessage({ ok: false, text });

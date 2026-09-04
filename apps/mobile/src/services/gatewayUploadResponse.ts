@@ -32,7 +32,7 @@ function isAttachmentRef(value: unknown): value is AttachmentRef {
     && typeof candidate.mimeType === 'string'
     && typeof candidate.size === 'number'
     && Number.isFinite(candidate.size)
-    && (candidate.kind === 'image' || candidate.kind === 'pdf');
+    && (candidate.kind === 'image' || candidate.kind === 'document');
 }
 
 export function parseGatewayUploadResponse(status: number, body: string): AttachmentRef {

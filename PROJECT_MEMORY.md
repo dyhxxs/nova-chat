@@ -2,8 +2,8 @@
 
 > **用途**：这是 Nova Chat 的长期上下文和交接记录。开始新的 Codex/ChatGPT 对话时，应先让助手读取本文件，再继续修改项目。
 >
-> **最后更新**：2026-09-01（Asia/Shanghai）  
-> **当前版本**：移动端/LAN 1.1.8；workspace package 1.1.3  
+> **最后更新**：2026-09-04（Asia/Shanghai）
+> **当前版本**：workspace / Mobile / Gateway / Protocol 1.1.13；最近已验证并发布的 LAN APK 为 1.1.13-lan
 > **工作区**：`E:\gptapp`
 
 ## 0. 新对话首先执行
@@ -16,6 +16,8 @@
 
 新助手不得仅凭本文中的“运行快照”判断当前状态，因为局域网 IP、进程、端口占用和第三方接口能力可能变化。必须先实际检查。
 
+涉及 Mobile 的页面、交互、权限、模型行为或其他会影响手机测试的修改时，完成代码验证后必须重新构建当前版本的 ARM64 LAN APK、覆盖 `artifacts/` 中对应文件，并实际校验 8790 下载直链与本地 APK 哈希一致；除非用户明确表示本轮不需要测试包。最终回复必须说明 APK 是否已重建，不能只完成 Metro 导出。
+
 ---
 
 ## 1. 产品目标
@@ -25,7 +27,7 @@ Nova Chat 是一个面向 Android/iOS 的自托管、多用户、GPT 风格聊�
 - 管理员统一配置第三方 OpenAI-compatible API 地址、API Key、协议和可用模型。
 - 普通用户只使用 Nova 网关地址、账号和密码，不接触第三方 API Key。
 - 支持多对话、流式输出、上下文、取消和重新生成。
-- 支持图片和 PDF 附件。
+- 支持常见图片、文本/代码、PDF、Office/OpenDocument 和 EPUB/MOBI 等附件。
 - 在第三方接口兼容时，支持 Responses API、Web Search、Code Interpreter 等工具。
 - 当前先使用家庭局域网完成真机测试，生产环境最终应部署 HTTPS/WSS 公网服务器。
 
@@ -954,3 +956,173 @@ APK 直链：http://192.168.0.113:8790/NovaChat-1.1.8-android-arm64-lan.apk
 - 当前图片续作采用跨服务商兼容的文字重建方式，尚未统一使用 multipart `/images/edits`，因此具体保真度仍取决于图片服务商。
 
 验证结果（2026-09-02）：`npm run typecheck --workspaces --if-present`、`npm run test --workspaces --if-present`（Mobile 7 个测试文件 / 22 项测试，Gateway 6 个测试文件 / 40 项测试）、`npm run lint --workspaces --if-present`、`npm run build` 和 `npm run verify` 均通过。未重新构建 APK。
+
+### 2026-09-03：回答模型归属、模型切换竞态与停止生成修复
+
+用户反馈回答流程和模型切换不稳定，并要求一并排查其他明显问题。
+
+本轮定位与修复：
+
+- 修复旧回答完成后覆盖用户新模型选择的竞态：服务端返回的实际响应模型不再写回全局设置，用户手动选择只影响后续发送。
+- 每条 assistant 消息新增可选的 `requestedModel` 和 `model` 元数据；发送和重新生成时冻结请求模型，完成时保存网关实际使用的模型。消息气泡会显示正在使用、请求模型或“实际模型 / 原选模型”，自动降级和图片模型路由不再看起来像串模型。
+- 修复模型目录 effect 依赖当前模型导致每次切换都重拉 `/v1/models` 的问题；目录请求失败时保留已有模型，不再退化成单一模型，打开对话设置时会主动重试，并用最新设置处理异步响应。
+- 修复空 body 的 POST/DELETE 请求仍携带 `Content-Type: application/json`，被 Fastify 5 以 `FST_ERR_CTP_EMPTY_JSON_BODY` 拒绝的问题。停止生成、登出、删除头像和无参数 Provider 测试现在不会发送错误的 JSON Content-Type。
+- 阻止同一条 streaming assistant 消息被重复“重新生成”，并在启动前增加活动任务去重，避免两个请求的 delta 写入同一消息。
+- 对活动生成任务增加消息级清理：对话被删除、重新生成截断后消息消失或消息不再 streaming 时，会取消并移除对应后台任务，避免孤儿请求继续运行。
+- 修正生成启动失败后的提示和 Composer 行为：消息已经写入历史时会清空输入，避免用户再次点击造成重复发送；错误文案不再错误声称“当前对话已有回复正在生成”。
+- 清理 Mobile Vitest 配置中重复的 `expo/file-system` alias。
+
+新增回归覆盖：
+
+- bodyless POST/DELETE 不携带 JSON Content-Type，而有 JSON body 的登录请求仍正确设置。
+- 模型切换后旧回答完成不会改变新选择，消息会保留请求模型和实际模型。
+- 重新生成会冻结当时的新模型并拒绝重复重新生成。
+- 回答气泡的模型标识覆盖正常、生成中和实际降级场景。
+
+验证结果（2026-09-03）：
+
+- `npm run verify`：通过。
+- Mobile：10 个测试文件 / 29 项测试通过。
+- Gateway：6 个测试文件 / 40 项测试通过。
+- Mobile、Gateway、Protocol TypeScript 检查通过；Mobile、Gateway ESLint 通过。
+- `npm run build`：通过（Protocol、Gateway）。
+- 本轮未重新构建 Android APK。
+
+安全记录：本次记忆没有写入任何 API Key、Session Token、管理员密码、初始化口令、`SERVER_MASTER_KEY` 或真实 `.env` 内容。
+
+### 2026-09-03：移动 App 对话页重设计、附件入口与 durable job 恢复
+
+用户要求继续缩小与 Codex/豆包类移动对话体验的差距，重点改进 App 页面、模型下拉选择、默认思考强度、拍照/相册/文件入口和后台回答可靠性。
+
+本轮完成：
+
+- 聊天页删除原来的顶部“当前模型”大卡片；导航栏标题改为 `Nova + 当前思考强度 + 下拉箭头`，点击后打开“模型与回答方式”弹窗。模型 ID 只在弹窗/设置页中显示，不再占用对话页首屏。
+- “模型与回答方式”弹窗改成原生移动端分组卡片设计：支持模型搜索、明显的模型选中态、完整中文思考档位、回答详略，并明确标注“中等思考”为默认值。设置页的思考档位文案同步改为“直接、轻度、中等、深度、高强度”。
+- 新安装/无有效旧设置时继续默认 `reasoningEffort: medium`；不会强制覆盖用户以前主动保存的其他思考档位。旧 `max` 仍安全迁移为 `xhigh`。
+- Composer 改成移动 App 风格：横向思考/网页搜索/代码工具快捷条，圆角浮动输入框，独立停止按钮、附件加号和发送按钮。回答生成时仍可输入并发送下一条消息，停止操作不会占用发送入口。
+- 新增附件托盘和直接拍照入口：相机、相册、文件三项均可触达；最多 8 个附件，单个 25 MB。附件能力已在 1.1.12 扩展为常见图片、PDF、文本/代码、Office/OpenDocument、EPUB/MOBI 等；界面不再展示完整支持格式列表，由网关负责真实类型校验。
+- 新增相机权限申请和 `launchCameraAsync` 流程，并复用图片 MIME、名称、大小和格式校验。`app.json` 不再阻止 Android CAMERA 权限，加入 Expo ImagePicker 的照片/相机中文权限说明，同时显式关闭麦克风权限；当前没有伪造语音或电话功能。
+- 空对话页改为更轻量的 Nova 标识、推荐问题和“拍照提问或识别内容”入口；空状态现在可纵向滚动，避免小屏设备被 Composer 挤压后内容溢出。
+- assistant 消息继续保存请求模型与实际模型，并新增/保留 durable generation 元数据：`generationRequestId`、冻结的思考/详略/token/工具选项、开始时间和完成时间。每轮发送及重新生成都绑定当时选择的模型与选项，旧回答完成不会覆盖用户后来选择的模型。
+- App 重启/重新 hydration 后，带 durable request ID 的 streaming 消息会轮询 Gateway job 并重新附着；支持增量快照、完整文本替换、完成、取消、失败和 job 过期。页面卸载只 `dispose()` 本地监听，不取消服务器任务；用户明确停止或删除仍在生成的对话时才会取消 Gateway job。
+- assistant 回答增加可折叠详情：请求模型、实际模型、是否发生网关切换、思考强度、回答详略、工具、输出 token 上限、token 用量、耗时和短任务 ID。回答详情及复制/重新生成按钮扩大触控区域，摘要文字不再抢占点击手势。
+- 历史页支持同时搜索标题与消息正文，显示总数、搜索结果数和后台生成数；每条记录显示摘要、消息数、生成状态、更新时间和当前对话标记，并增加跨平台重命名与删除操作。修复三点菜单点击冒泡导致误打开对话、点击 action sheet 内部可能误关闭的问题。
+- 对话标题重命名会合并多余空白、拒绝空标题并限制 80 字符。
+
+验证结果（2026-09-03，Asia/Shanghai）：
+
+- `git diff --check`：通过；仅有 Windows 下 LF/CRLF 转换提示，没有空白错误。
+- `npx expo config --type public`：通过；Expo SDK 57 配置、相机/照片权限插件解析成功。
+- `npx expo export --platform android`：通过；Metro 成功打包 1316 个模块并生成 Android Hermes bundle。
+- `npm run verify`：通过。
+- Mobile：11 个测试文件 / 39 项测试通过。
+- Gateway：6 个测试文件 / 40 项测试通过。
+- Mobile、Gateway、Protocol TypeScript 检查通过；Mobile、Gateway ESLint 通过。
+- `npm run build`：通过（Protocol、Gateway）。
+- 本轮未做真机像素级截图验收；后续仍需在 360px 左右手机、深浅色和软键盘场景完成真机点按回归。
+- 发现仅修改 `app.json` 尚未同步到已存在的原生 Android Manifest：`apps/mobile/android/app/src/main/AndroidManifest.xml` 仍通过 `tools:node="remove"` 移除 CAMERA 权限。已改为显式声明 `android.permission.CAMERA` 并重新构建，避免“拍照”入口在安装包中无法取得相机权限。
+- 已于 2026-09-03 11:09（Asia/Shanghai）重新构建并发布 `E:\gptapp\artifacts\NovaChat-1.1.11-android-arm64-lan.apk`，预置网关为 `http://192.168.0.113:8787`。
+- APK 元数据：包名 `com.novachat.mobile.lan`，versionName `1.1.11-lan`，versionCode `13`，minSdk 24，targetSdk 36，仅含 `arm64-v8a`。
+- APK 大小：`35,331,221` bytes；SHA-256：`7D48AAD69753AE89E3E590C5F3A020B845A42D07715DE02DEEE365CB63E9C3E9`。
+- APK 权限复核：包含 `android.permission.INTERNET` 与 `android.permission.CAMERA`，不包含麦克风和旧式外部存储权限。
+- `scripts/build_lan_android.ps1` 已加固：每次 LAN 构建前会同步被 Git 忽略的原生 Manifest 相机权限；构建后强制检查包名、版本、ARM64 架构、INTERNET/CAMERA 权限、无麦克风权限、APK 签名和 zipalign，任一不符合都会让构建失败，避免以后再次发布“名称是最新版但原生能力未同步”的测试包。
+- 下载服务和网关健康检查均通过；直链 HEAD 返回 HTTP 200、`Content-Length: 35331221`、`Accept-Ranges: bytes`、`Cache-Control: no-store`。从 8790 完整下载后的 SHA-256 与本地构建产物完全一致。
+- 当前手机下载直链：`http://192.168.0.113:8790/NovaChat-1.1.11-android-arm64-lan.apk`。
+
+安全记录：本次记忆没有写入任何 API Key、Session Token、管理员密码、初始化口令、`SERVER_MASTER_KEY` 或真实 `.env` 内容。
+### 2026-09-03：1.1.12 附件能力、字体和最新测试包
+
+针对“文件种类太少、页面字体和移动端体验不够好、需要最新 APK 测试”的反馈，已完成并验证以下更新：
+
+- 版本统一升级为 `1.1.12`：根项目、Mobile、Gateway、Protocol、Android `versionCode=14`、iOS `buildNumber=14`；`package-lock.json` 已同步。
+- 附件支持扩展：JPEG、PNG、WebP、GIF、HEIC/HEIF、AVIF、BMP、TIFF；PDF；TXT/Markdown/CSV/TSV/JSON/JSONL/XML/HTML/CSS/JS/TS/Python/Java/Kotlin/C/C++/C#/Go/Rust/Ruby/PHP/Swift/Shell/SQL/YAML/TOML/RTF 等文本和代码；DOC/DOCX/DOT/DOTX/DOCM/DOTM、XLS/XLSX/XLT/XLTX/XLSM/XLTM、PPT/PPTX/PPS/POTX/PPTM/POTM/PPSX/PPSM；ODT/OTT、ODS/OTS、ODP/OTP；EPUB、MOBI。
+- 网关增加真实文件签名校验、ZIP 解压大小限制，并支持从 Office/OpenDocument/EPUB/MOBI 提取文本；Chat Completions 对不能直接读取的文档返回通用降级提示，不再只针对 PDF。
+- 移动端文件选择器使用 `*/*`，页面只显示附件数量和大小限制，不再在界面上堆叠“支持格式列表”；服务器仍会拒绝不安全或不支持的真实文件。
+- 全局字体改为 Google Fonts 的 Manrope，并增加加载失败时的系统字体回退；主要页面、输入框、弹窗和消息组件已统一主题字体。
+- 对话页移除重复的顶部当前模型大卡片，模型从 Nova 下拉入口选择；默认思考强度为“中等思考”。拍照、相册、文件入口均保留，并同步 Android 原生 CAMERA 权限。
+- 已完成 `npm run verify`、`npm run build`、`npx expo export --platform android` 和 `git diff --check`；Mobile 11 个测试文件/39 项测试，Gateway 7 个测试文件/47 项测试全部通过。
+- 最新 ARM64 LAN APK：`artifacts/NovaChat-1.1.12-android-arm64-lan.apk`；包名 `com.novachat.mobile.lan`；versionName `1.1.12-lan`；versionCode `14`；仅 `arm64-v8a`；预置网关 `http://192.168.0.113:8787`；包含 INTERNET/CAMERA 权限，不含 RECORD_AUDIO。
+- APK 大小 `35,633,629` bytes；SHA-256：`C6E413D9E6D5C9C21E4BBA8B78C936EA0D0BB59DB6664B71391BEBA0E480216B`。
+- 已重启局域网下载服务并切换到 1.1.12。手机下载地址：`http://192.168.0.113:8790/NovaChat-1.1.12-android-arm64-lan.apk`；HEAD 返回 HTTP 200、Content-Length `35,633,629`、支持 Range，完整下载校验与本地产物 SHA-256 一致。
+- 本次未写入任何 API Key、Session Token、管理员密码、初始化口令、`SERVER_MASTER_KEY` 或真实 `.env` 内容。
+
+> 本节关于 APK 和下载服务的记录 supersedes 之前 1.1.11 记录；以后每次功能或版本更新都要重新构建 APK、更新 `artifacts`、重启下载服务并同步本文件。
+
+### 2026-09-03：1.1.13 会话独立性与并发生成隔离
+
+针对“每个会话的内容必须独立、切换会话或模型不能互相影响、旧请求不能覆盖新回答”的反馈，已完成以下修复：
+
+- 移动端生成回调统一按 `conversationId`、assistant 消息和 `requestId` 作用域写回；`appendAssistantDelta`、`replaceAssistantContent`、`completeAssistant`、`failAssistant`、`cancelAssistant` 会拒绝不匹配的旧请求，避免延迟回调污染新一代回答或其他会话。
+- 正常生成、停止生成、重新生成、后台恢复任务以及恢复任务的完成/失败/取消回调全部接入同一套 requestId 校验。
+- Durable generation 任务的查询和取消增加 `conversationId` 参数；网关会校验任务所属会话，错误会话返回 404，缺失或无效会话标识返回 `invalid_conversation_scope`，避免跨会话恢复或取消后台任务。
+- WebSocket `cancel` 消息要求同时携带 `requestId` 和 `conversationId`，取消操作也受到会话作用域保护。
+- 补充移动端和网关回归测试，覆盖两个会话互不影响、旧 requestId 不能修改新任务、错误会话恢复被拒绝，以及 durable job 查询/取消的会话参数校验。
+
+验证结果：
+
+- `npm run verify`：通过。
+- `npm run build`：通过。
+- Mobile：11 个测试文件、42 项测试通过；TypeScript 和 ESLint 通过。
+- Gateway：7 个测试文件、48 项测试通过；TypeScript 和 ESLint 通过。
+- 已重新导出 Android Hermes bundle 并重新构建最新版 ARM64 LAN APK。
+
+最新版 APK：
+
+- 文件：`artifacts/NovaChat-1.1.13-android-arm64-lan.apk`
+- 包名：`com.novachat.mobile.lan`
+- versionName：`1.1.13-lan`
+- versionCode：`15`
+- 架构：仅 `arm64-v8a`
+- 预置网关：`http://192.168.0.113:8787`
+- 权限：包含 INTERNET、CAMERA；不包含 RECORD_AUDIO
+- 大小：`35,634,173` bytes
+- SHA-256：`0848D61152E81C0A147D4210E05E4B64896028CA5ED2DD891E4FBB25C11515FC`
+- 手机下载地址：`http://192.168.0.113:8790/NovaChat-1.1.13-android-arm64-lan.apk`
+
+下载服务已切换到 1.1.13 后，需验证直链 HEAD 返回 HTTP 200、Content-Length 与 APK 大小一致、支持 Range，并校验完整下载文件的 SHA-256 与本地产物一致。
+
+安全记录：本次记忆没有写入任何 API Key、Session Token、管理员密码、初始化口令、`SERVER_MASTER_KEY` 或真实 `.env` 内容。
+
+下载服务补充验证（2026-09-03）：
+
+- 已安全重启 `8790` 局域网下载服务，服务读取当前 `apps/mobile/app.json` 版本后已切换至 `1.1.13`。
+- `http://192.168.0.113:8790/` 页面已列出 `NovaChat-1.1.13-android-arm64-lan.apk`。
+- APK 直链 HEAD：HTTP 200；`Content-Length: 35,634,173`；`Accept-Ranges: bytes`。
+- Range 请求 `bytes=0-15`：HTTP 206，`Content-Range: bytes 0-15/35634173`。
+- 从下载地址完整下载后的文件大小为 `35,634,173` bytes，SHA-256 与本地产物一致：`0848D61152E81C0A147D4210E05E4B64896028CA5ED2DD891E4FBB25C11515FC`。
+### 2026-09-04：账号隔离回归、注册开关/管理员/Token 测试与朋友下载包
+
+- 复核移动端账号隔离：对话持久化按 `userId + serverUrl` 分桶；登录、登出或 `/v1/auth/me` 识别到不同账户时先清空可见本地状态；生成回调按 `conversationId + messageId + requestId` 校验，旧请求不能写入新会话。
+- 新增网关回归覆盖：`REGISTRATION_ENABLED=false` 时公开注册返回 `registration_disabled`，已有管理员仍可登录；配置的 legacy `APP_ACCESS_TOKEN` 可鉴权 legacy 用户，错误 Token 返回 401，logout 不会把静态 legacy Token 误当作可撤销 Session。
+- 定向测试：Gateway 管理员/注册开关/Token 18 项通过；Mobile 账号隔离与生成代际 8 项通过。
+- `npm run verify`：通过；Mobile 12 个测试文件 / 44 项测试，Gateway 7 个测试文件 / 50 项测试，TypeScript 与 ESLint 均通过。
+- `npm run build`：通过（Protocol、Gateway）。
+- 已重新构建当前 1.1.13 ARM64 LAN APK，覆盖 `artifacts/NovaChat-1.1.13-android-arm64-lan.apk`；包名 `com.novachat.mobile.lan`，versionName `1.1.13-lan`，versionCode `15`，仅 `arm64-v8a`，预置网关 `http://192.168.0.113:8787`。
+- APK 大小 `35,638,181` bytes；SHA-256：`3301FB0F50ABCF0085BF2F01E775AC8CC7B7B0690EBCB64E478573B107CB2689`；构建脚本已验证 INTERNET/CAMERA、无 RECORD_AUDIO、签名和 zipalign。
+- 已准备仅包含当前 APK 的临时分享目录 `.run/friend-share`，并启动 Cloudflare Quick Tunnel。公网地址和 Token 只在当前交接消息中提供，不写入本文件；下载完成后执行 `powershell -ExecutionPolicy Bypass -File scripts\stop_download_tunnel.ps1`。
+- 临时下载入口已验证：页面 HTTP 200；APK HEAD HTTP 200、Content-Length `35,638,181`、支持 Range；`bytes=0-15` 返回 206；完整公网下载文件 SHA-256 与本地产物一致。
+- 该 APK 是 LAN 测试包，朋友即使能从公网下载，安装后仍需与 `192.168.0.113` 所在局域网连通，或在 App 设置中改为可访问的网关地址；当前 Quick Tunnel 仅用于 APK 下载，没有把 LAN APK 自动改成公网网关配置。
+
+### 2026-09-04：共享图片服务账号的并发 429 排查与网关排队修复
+
+- 运行日志确认用户截图中的 `Concurrency limit exceeded for account` 来自上游图片服务返回的 HTTP 429，而不是手机网络、Cloudflare Tunnel、用户本地账号或 Nova 自己的按用户并发限制。
+- 原因是公网与局域网用户都使用管理员在同一个 Gateway 中配置的同一第三方 API Key；上游按 provider account 计算图片并发，所以一个用户正在生成图片时，另一个用户可能撞到账号级并发上限。稍后名额释放后另一请求又会成功，因此会出现“朋友失败、我们能用”的时间差。
+- Gateway 新增共享图片请求 FIFO 信号量，默认 `MAX_CONCURRENT_IMAGE_REQUESTS=100`：同一 Gateway 最多允许 100 个图片请求同时进入上游；文字请求不受该队列影响，等待中的请求支持 AbortSignal 取消，取消后不会占用名额。当前上游账号已确认支持高并发，因此生产 `.env` 已设置为 100；如果服务商配额变化，应按实际配额调小。
+- 上游并发 429 现在映射为 `provider_concurrency_limited` 和中文可重试提示，不再把英文错误原样显示给用户。
+- 即使有 Gateway 之外的程序共用同一 Key，图片请求仍会按 `Retry-After` 或 5 秒、10 秒的有限退避自动重试；重试次数与最大等待可通过环境变量调整，默认只重试 2 次，避免无限放大请求和计费。
+- 新增回归测试覆盖：并发错误中文映射、同一图片模型自动重试、不同用户共享账号时不并发调用上游、排队请求可取消、AsyncSemaphore 释放与取消、配置默认值。
+- `npm run verify` 通过：Mobile 12 个测试文件 / 44 项测试；Gateway 7 个测试文件 / 58 项测试；所有 workspace TypeScript 与 ESLint 均通过。
+- 最新 Gateway 已构建并重启；本机、局域网、公网 `/health` 均返回正常，公网注册开关仍为启用，Gateway stderr 为空。公网 Tunnel、局域网下载服务和公网下载服务未被重启或冲突。
+- 本次仅修改服务端 Gateway；已经安装公网 APK 的朋友无需重新下载或重新配置，继续使用原公网地址即可自动获得排队与重试修复。
+
+安全记录：本次记忆没有写入任何 API Key、Session Token、管理员密码、初始化口令、下载 Token、`SERVER_MASTER_KEY` 或真实 `.env` 内容。
+
+### 2026-09-04：GitHub 公共发布整理
+
+- 重写 `README.md`：增加中英文项目定位、功能矩阵、快速开始、生产部署、下载安全、分享和贡献入口，明确 Nova Chat 是第三方开源客户端，不是 OpenAI/ChatGPT/Codex 官方产品。
+- 增加根 `package.json` 的 description、repository、homepage、issues 和 keywords，帮助代码托管平台与开发工具正确识别项目。
+- 增加 `CONTRIBUTING.md` 以及 GitHub Bug/Feature Issue 表单，方便新用户反馈和贡献。
+- 已完成本地验证：`npm run verify`（Mobile 44 项测试、Gateway 58 项测试、TypeScript、ESLint）通过；`npm run build` 通过。
+- APK 继续保持不提交进 Git 历史，公开分发应使用 GitHub Releases 或支持 HTTPS/Range 的对象存储；不要分享包含局域网地址、临时 Tunnel 或秘密信息的测试包。
+
+安全记录：本次记忆没有写入任何 API Key、Session Token、管理员密码、初始化口令、下载 Token、`SERVER_MASTER_KEY` 或真实 `.env` 内容。

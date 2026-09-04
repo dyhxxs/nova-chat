@@ -2,11 +2,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, type AttachmentRef, type GeneratedAttachment, type TokenUsage } from '@nova-chat/protocol';
+import { normalizeServerUrl } from '../lib/connection';
 import { createId } from '../lib/id';
 import { titleFromMessage } from '../lib/title';
 import type { AppMessage, AppSettings, AuthStatus, Conversation, UserProfile } from '../types';
 
-const STORAGE_KEY = '@nova-chat/state/v1';
+// Conversation data must never live in one unscoped device-wide bucket.  v1
+// had no account owner, so it is intentionally not eligible for restore after
+// the isolation fix.  Losing legacy local history is safer than showing it to
+// a different account.
+const SETTINGS_STORAGE_KEY = '@nova-chat/settings/v1';
+const ACCOUNT_STORAGE_PREFIX = '@nova-chat/account/v1/';
+const LEGACY_STORAGE_KEY = '@nova-chat/state/v1';
+const INTERIM_UNSCOPED_STORAGE_KEY = '@nova-chat/state/v2';
 const TOKEN_KEY = 'nova-chat-session-token';
 const DEFAULT_GATEWAY_URL = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim() ?? '';
 
@@ -32,9 +40,17 @@ function freshConversation(now = Date.now()): Conversation {
 }
 
 type PersistedState = {
-  version: 5;
+  version: 7;
+  /** The account that owns the conversations in this snapshot. */
+  userId?: string;
   conversations: Conversation[];
   activeConversationId: string;
+  settings: AppSettings;
+  deviceId: string;
+};
+
+type PersistedSettings = {
+  version: 1;
   settings: AppSettings;
   deviceId: string;
 };
@@ -51,101 +67,219 @@ type AppState = {
   connectionStatus: ConnectionStatus;
   authStatus: AuthStatus;
   user?: UserProfile;
+  /** Owner of the currently loaded local conversation snapshot. */
+  dataOwnerId?: string;
   hydrate: () => Promise<void>;
+  restoreUserState: (user: UserProfile) => Promise<void>;
   newConversation: () => string;
   setActiveConversation: (id: string) => void;
   beginTurn: (content: string, attachments?: AttachmentRef[], targetConversationId?: string, requestedModel?: string) => { conversationId: string; assistantMessageId: string };
-  appendAssistantDelta: (conversationId: string, messageId: string, delta: string) => void;
-  replaceAssistantContent: (conversationId: string, messageId: string, content: string) => void;
-  completeAssistant: (conversationId: string, messageId: string, completion?: { model?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[] }) => void;
-  failAssistant: (conversationId: string, messageId: string, message: string, retryable: boolean) => void;
-  cancelAssistant: (conversationId: string, messageId: string) => void;
+  bindAssistantGeneration: (conversationId: string, messageId: string, generation: { requestId: string; options: NonNullable<AppMessage['generationOptions']>; startedAt?: number }) => boolean;
+  appendAssistantDelta: (conversationId: string, messageId: string, delta: string, requestId?: string) => void;
+  replaceAssistantContent: (conversationId: string, messageId: string, content: string, requestId?: string) => void;
+  completeAssistant: (conversationId: string, messageId: string, completion?: { requestId?: string; model?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[] }) => void;
+  failAssistant: (conversationId: string, messageId: string, message: string, retryable: boolean, requestId?: string) => void;
+  cancelAssistant: (conversationId: string, messageId: string, requestId?: string) => void;
   prepareRegeneration: (conversationId: string, messageId: string) => boolean;
+  renameConversation: (id: string, title: string) => boolean;
   deleteConversation: (id: string) => void;
   clearConversations: () => void;
   updateSettings: (patch: Partial<AppSettings>) => void;
-  setSession: (token: string, user: UserProfile) => Promise<void>;
+  setSession: (token: string, user: UserProfile, serverUrl?: string) => Promise<void>;
   clearSession: () => Promise<void>;
   setAuthState: (status: AuthStatus, user?: UserProfile) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
 };
 
 let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
+let persistenceChain = Promise.resolve();
+let sessionLoadGeneration = 0;
+function accountStorageKey(userId: string, serverUrl: string) {
+  return `${ACCOUNT_STORAGE_PREFIX}${encodeURIComponent(userId)}:${encodeURIComponent(normalizeServerUrl(serverUrl))}`;
+}
+
+function settingsSnapshot(state: AppState): PersistedSettings {
+  return { version: 1, settings: state.settings, deviceId: state.deviceId };
+}
+
 function serializable(state: AppState): PersistedState {
   return {
-    version: 5,
+    version: 7,
+    userId: state.dataOwnerId,
     conversations: state.conversations.slice(0, 100),
     activeConversationId: state.activeConversationId,
     settings: state.settings,
     deviceId: state.deviceId,
   };
 }
+function persistState(state: AppState) {
+  // Conversations are written only to an account + gateway scoped key.  When
+  // logged out, persist settings/device metadata only; never persist a
+  // conversation in an unscoped bucket.
+  const key = state.dataOwnerId ? accountStorageKey(state.dataOwnerId, state.settings.serverUrl) : SETTINGS_STORAGE_KEY;
+  const payload = state.dataOwnerId ? serializable(state) : settingsSnapshot(state);
+  // Writes are serialized so account switches cannot reorder snapshots.
+  const snapshot = JSON.stringify(payload);
+  persistenceChain = persistenceChain.catch(() => undefined).then(async () => {
+    await AsyncStorage.setItem(key, snapshot);
+    // Keep only connection/device bootstrap data globally so a restored token
+    // can find its gateway before /v1/auth/me is called. This key never
+    // contains conversations.
+    if (state.dataOwnerId) {
+      await AsyncStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settingsSnapshot(state)));
+    }
+  });
+  return persistenceChain;
+}
+
+function newLocalState(settings: AppSettings, deviceId = createId()) {
+  const conversation = freshConversation();
+  return {
+    conversations: [conversation],
+    activeConversationId: conversation.id,
+    settings,
+    deviceId,
+  };
+}
+
+function normalizeSettings(persisted: Partial<AppSettings> | undefined, fallback: AppSettings): AppSettings {
+  const merged = { ...defaultSettings, ...fallback, ...(persisted ?? {}) };
+  return {
+    ...merged,
+    serverUrl: DEFAULT_GATEWAY_URL || fallback.serverUrl || merged.serverUrl || defaultSettings.serverUrl,
+    reasoningEffort: normalizeReasoningEffort(merged.reasoningEffort),
+  };
+}
+
+function restoreConversations(value: unknown) {
+  const parsed = Array.isArray(value) ? value : [];
+  const restored = parsed.filter((conversation): conversation is Conversation => Boolean(conversation && typeof conversation === 'object' && typeof (conversation as Conversation).id === 'string'))
+    .map((conversation) => ({
+      ...conversation,
+      messages: (Array.isArray(conversation.messages) ? conversation.messages : []).map((message) => ({
+        ...message,
+        attachments: Array.isArray(message.attachments) ? message.attachments : [],
+        ...(message.status === 'streaming' && !message.generationRequestId
+          ? { status: 'error' as const, errorMessage: '上次生成被中断，可以点击重新生成。', retryable: true, completedAt: Date.now() }
+          : {}),
+      })),
+    }));
+  return restored.length ? restored : undefined;
+}
+
+async function readAccountState(userId: string, serverUrl: string, fallbackSettings: AppSettings, fallbackDeviceId: string) {
+  const blank = newLocalState(normalizeSettings(undefined, fallbackSettings), fallbackDeviceId);
+  try {
+    const raw = await AsyncStorage.getItem(accountStorageKey(userId, serverUrl));
+    if (!raw) return blank;
+    const parsed = JSON.parse(raw) as Partial<PersistedState>;
+    if (parsed.version !== 7 || parsed.userId !== userId) return blank;
+    const conversations = restoreConversations(parsed.conversations) ?? blank.conversations;
+    const activeConversationId = conversations.some((item) => item.id === parsed.activeConversationId)
+      ? parsed.activeConversationId as string
+      : conversations[0]!.id;
+    return {
+      conversations,
+      activeConversationId,
+      settings: normalizeSettings(parsed.settings, fallbackSettings),
+      deviceId: typeof parsed.deviceId === 'string' && parsed.deviceId.length >= 8 ? parsed.deviceId : fallbackDeviceId,
+    };
+  } catch {
+    return blank;
+  }
+}
+
+function readSettings(raw: string | null): { settings?: Partial<AppSettings>; deviceId?: string } {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as Partial<PersistedSettings> & Partial<PersistedState>;
+    if (parsed.settings && typeof parsed.settings === 'object') {
+      return { settings: parsed.settings, deviceId: parsed.deviceId };
+    }
+    // Legacy v1 stored settings at the top level.  Do not read its
+    // conversations because there is no reliable account owner.
+    return { settings: parsed as Partial<AppSettings>, deviceId: parsed.deviceId };
+  } catch {
+    return {};
+  }
+}
+
+const initialLocalState = newLocalState(defaultSettings);
+
 function schedulePersistence(state: AppState, immediate = false) {
   if (persistenceTimer) clearTimeout(persistenceTimer);
-  const save = () => { void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializable(state))).catch(() => undefined); };
+  const save = () => {
+    persistenceTimer = undefined;
+    void persistState(state).catch(() => undefined);
+  };
   if (immediate) save();
   else persistenceTimer = setTimeout(save, 450);
 }
 
-const initialConversation = freshConversation();
-
 export const useAppStore = create<AppState>((set, get) => ({
   hydrated: false,
-  conversations: [initialConversation],
-  activeConversationId: initialConversation.id,
+  conversations: initialLocalState.conversations,
+  activeConversationId: initialLocalState.activeConversationId,
   settings: defaultSettings,
   accessToken: '',
   deviceId: createId(),
   connectionStatus: 'unknown',
   authStatus: 'unknown',
   user: undefined,
+  dataOwnerId: undefined,
 
   hydrate: async () => {
     try {
-      const [raw, token] = await Promise.all([
-        AsyncStorage.getItem(STORAGE_KEY),
+      const [settingsRaw, legacyRaw, interimRaw, token] = await Promise.all([
+        AsyncStorage.getItem(SETTINGS_STORAGE_KEY),
+        AsyncStorage.getItem(LEGACY_STORAGE_KEY),
+        AsyncStorage.getItem(INTERIM_UNSCOPED_STORAGE_KEY),
         SecureStore.getItemAsync(TOKEN_KEY).catch(() => ''),
       ]);
       // Remove the legacy direct-provider key introduced by the old dual-mode client.
       try { await SecureStore.deleteItemAsync('nova-chat-direct-api-key'); } catch { /* Ignore unavailable secure storage. */ }
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<PersistedState>;
-        const restored = Array.isArray(parsed.conversations) ? parsed.conversations.map((conversation) => ({
-          ...conversation,
-          messages: (Array.isArray(conversation.messages) ? conversation.messages : []).map((message) => ({
-            ...message,
-            attachments: Array.isArray(message.attachments) ? message.attachments : [],
-            ...(message.status === 'streaming'
-              ? { status: 'error' as const, errorMessage: '上次生成被中断，可以点击重新生成。', retryable: true }
-              : {}),
-          })),
-        })) : [];
-        const conversations = restored.length ? restored : [freshConversation()];
-        const activeConversationId = conversations.some((item) => item.id === parsed.activeConversationId)
-          ? parsed.activeConversationId as string
-          : conversations[0]!.id;
-        set({
-          conversations,
-          activeConversationId,
-          settings: {
-            ...defaultSettings,
-            ...(parsed.settings ?? {}),
-            reasoningEffort: normalizeReasoningEffort(parsed.settings?.reasoningEffort ?? defaultSettings.reasoningEffort),
-            // Legacy persisted direct mode is intentionally ignored: all requests use Gateway.
-            serverUrl: DEFAULT_GATEWAY_URL || (typeof parsed.settings?.serverUrl === 'string' ? parsed.settings.serverUrl : defaultSettings.serverUrl),
-          },
-          deviceId: typeof parsed.deviceId === 'string' && parsed.deviceId.length >= 8 ? parsed.deviceId : createId(),
-          accessToken: token ?? '',
-          authStatus: token ? 'unknown' : 'unauthenticated',
-          hydrated: true,
-        });
-      } else {
-        set({ accessToken: token ?? '', authStatus: token ? 'unknown' : 'unauthenticated', hydrated: true });
-        schedulePersistence(get(), true);
-      }
+      // Restore only non-sensitive, non-conversation settings before the
+      // token is validated. Account conversations are loaded later, after
+      // /v1/auth/me confirms the exact user identity.
+      const saved = readSettings(settingsRaw ?? legacyRaw ?? interimRaw);
+      const settings = normalizeSettings(saved.settings, defaultSettings);
+      const deviceId = typeof saved.deviceId === 'string' && saved.deviceId.length >= 8 ? saved.deviceId : createId();
+      const blank = newLocalState(settings, deviceId);
+      set({
+        ...blank,
+        accessToken: token ?? '',
+        authStatus: token ? 'unknown' : 'unauthenticated',
+        dataOwnerId: undefined,
+        hydrated: true,
+      });
+      // Remove the old unscoped snapshot after attempting migration.  This is
+      // best-effort and does not affect startup if SecureStore/AsyncStorage is
+      // temporarily unavailable.
+      try {
+        await Promise.all([
+          AsyncStorage.removeItem(LEGACY_STORAGE_KEY),
+          AsyncStorage.removeItem(INTERIM_UNSCOPED_STORAGE_KEY),
+        ]);
+      } catch { /* Ignore storage implementations without removeItem. */ }
+      if (!settingsRaw && (legacyRaw || interimRaw)) schedulePersistence(get(), true);
     } catch {
-      set({ hydrated: true, authStatus: 'unauthenticated' });
+      const blank = newLocalState(defaultSettings);
+      set({ ...blank, hydrated: true, authStatus: 'unauthenticated', dataOwnerId: undefined });
     }
+  },
+
+  restoreUserState: async (user) => {
+    const generation = ++sessionLoadGeneration;
+    const state = get();
+    const restored = await readAccountState(user.id, state.settings.serverUrl, state.settings, state.deviceId);
+    if (generation !== sessionLoadGeneration) return;
+    set({
+      ...restored,
+      user,
+      dataOwnerId: user.id,
+      authStatus: 'authenticated',
+    });
+    await persistState(get()).catch(() => undefined);
   },
 
   newConversation: () => {
@@ -189,22 +323,47 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { conversationId, assistantMessageId };
   },
 
-  appendAssistantDelta: (conversationId, messageId, delta) => {
+  bindAssistantGeneration: (conversationId, messageId, generation) => {
+    const requestId = generation.requestId.trim();
+    if (!requestId) return false;
+    let bound = false;
+    set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
+      ...conversation,
+      updatedAt: Date.now(),
+      messages: conversation.messages.map((message) => {
+        if (message.id !== messageId || message.role !== 'assistant' || message.status !== 'streaming') return message;
+        bound = true;
+        return {
+          ...message,
+          generationRequestId: requestId,
+          generationOptions: generation.options,
+          generationStartedAt: generation.startedAt ?? Date.now(),
+          completedAt: undefined,
+        };
+      }),
+    } : conversation) }));
+    if (bound) schedulePersistence(get(), true);
+    return bound;
+  },
+
+  appendAssistantDelta: (conversationId, messageId, delta, requestId) => {
     set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
       ...conversation,
       updatedAt: Date.now(),
       messages: conversation.messages.map((message) => message.id === messageId && message.status === 'streaming'
+        && (!requestId || message.generationRequestId === requestId)
         ? { ...message, content: message.content + delta }
         : message),
     } : conversation) }));
     schedulePersistence(get());
   },
 
-  replaceAssistantContent: (conversationId, messageId, content) => {
+  replaceAssistantContent: (conversationId, messageId, content, requestId) => {
     set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
       ...conversation,
       updatedAt: Date.now(),
       messages: conversation.messages.map((message) => message.id === messageId && message.status === 'streaming'
+        && (!requestId || message.generationRequestId === requestId)
         ? { ...message, content }
         : message),
     } : conversation) }));
@@ -217,28 +376,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       ...conversation,
       updatedAt: Date.now(),
       messages: conversation.messages.map((message) => message.id === messageId && message.status === 'streaming'
-        ? { ...message, status: 'complete', usage: completion.usage, attachments: completion.attachments ?? [], model }
+        && (!completion.requestId || message.generationRequestId === completion.requestId)
+        ? { ...message, status: 'complete', usage: completion.usage, attachments: completion.attachments ?? [], model, completedAt: Date.now() }
         : message),
     } : conversation) }));
     schedulePersistence(get(), true);
   },
 
-  failAssistant: (conversationId, messageId, message, retryable) => {
+  failAssistant: (conversationId, messageId, message, retryable, requestId) => {
     set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
       ...conversation,
       updatedAt: Date.now(),
       messages: conversation.messages.map((item) => item.id === messageId && item.status === 'streaming'
-        ? { ...item, status: 'error', errorMessage: item.content ? `回复中断：${message}` : message, retryable }
+        && (!requestId || item.generationRequestId === requestId)
+        ? { ...item, status: 'error', errorMessage: item.content ? `回复中断：${message}` : message, retryable, completedAt: Date.now() }
         : item),
     } : conversation) }));
     schedulePersistence(get(), true);
   },
 
-  cancelAssistant: (conversationId, messageId) => {
+  cancelAssistant: (conversationId, messageId, requestId) => {
     set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
       ...conversation,
       messages: conversation.messages.map((message) => message.id === messageId && message.status === 'streaming'
-        ? { ...message, status: 'cancelled', errorMessage: undefined }
+        && (!requestId || message.generationRequestId === requestId)
+        ? { ...message, status: 'cancelled', errorMessage: undefined, completedAt: Date.now() }
         : message),
     } : conversation) }));
     schedulePersistence(get(), true);
@@ -263,10 +425,27 @@ export const useAppStore = create<AppState>((set, get) => ({
         usage: undefined,
         requestedModel,
         model: undefined,
+        generationRequestId: undefined,
+        generationOptions: undefined,
+        generationStartedAt: undefined,
+        completedAt: undefined,
       } : message),
     } : item) }));
     schedulePersistence(get(), true);
     return true;
+  },
+
+  renameConversation: (id, title) => {
+    const cleaned = title.replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (!cleaned) return false;
+    let renamed = false;
+    set((state) => ({ conversations: state.conversations.map((conversation) => {
+      if (conversation.id !== id) return conversation;
+      renamed = true;
+      return { ...conversation, title: cleaned, updatedAt: Date.now() };
+    }).sort((a, b) => b.updatedAt - a.updatedAt) }));
+    if (renamed) schedulePersistence(get(), true);
+    return renamed;
   },
 
   deleteConversation: (id) => {
@@ -291,17 +470,63 @@ export const useAppStore = create<AppState>((set, get) => ({
     schedulePersistence(get(), true);
   },
 
-  setSession: async (token, user) => {
-    set({ accessToken: token, user, authStatus: 'authenticated' });
+  setSession: async (token, user, requestedServerUrl) => {
+    const generation = ++sessionLoadGeneration;
+    if (persistenceTimer) { clearTimeout(persistenceTimer); persistenceTimer = undefined; }
+    const current = get();
+    const serverUrl = requestedServerUrl ?? current.settings.serverUrl;
+    const blank = newLocalState(
+      { ...defaultSettings, serverUrl: DEFAULT_GATEWAY_URL || serverUrl },
+      current.deviceId,
+    );
+    // Clear the visible state before loading the new account, then restore
+    // only the snapshot whose owner matches the newly authenticated user.
+    set({ ...blank, accessToken: token, user, authStatus: 'unknown', dataOwnerId: undefined });
     try { await SecureStore.setItemAsync(TOKEN_KEY, token); } catch { /* SecureStore is required on native builds. */ }
+    const restored = await readAccountState(user.id, serverUrl, current.settings, current.deviceId);
+    if (generation !== sessionLoadGeneration) return;
+    set({ ...restored, accessToken: token, user, authStatus: 'authenticated', dataOwnerId: user.id });
+    await persistState(get()).catch(() => undefined);
   },
 
   clearSession: async () => {
-    set({ accessToken: '', user: undefined, authStatus: 'unauthenticated', connectionStatus: 'unknown' });
+    ++sessionLoadGeneration;
+    if (persistenceTimer) { clearTimeout(persistenceTimer); persistenceTimer = undefined; }
+    const serverUrl = get().settings.serverUrl;
+    const conversation = freshConversation();
+    set({
+      accessToken: '',
+      user: undefined,
+      authStatus: 'unauthenticated',
+      connectionStatus: 'unknown',
+      dataOwnerId: undefined,
+      conversations: [conversation],
+      activeConversationId: conversation.id,
+      settings: { ...defaultSettings, serverUrl: DEFAULT_GATEWAY_URL || serverUrl },
+    });
     try { await SecureStore.deleteItemAsync(TOKEN_KEY); } catch { /* Ignore unavailable secure storage in web previews. */ }
+    await persistState(get()).catch(() => undefined);
   },
 
-  setAuthState: (authStatus, user) => set({ authStatus, user }),
+  setAuthState: (authStatus, user) => {
+    if (authStatus === 'authenticated' && user && get().dataOwnerId !== user.id) {
+      ++sessionLoadGeneration;
+      if (persistenceTimer) { clearTimeout(persistenceTimer); persistenceTimer = undefined; }
+      const serverUrl = get().settings.serverUrl;
+      const conversation = freshConversation();
+      set({
+        conversations: [conversation],
+        activeConversationId: conversation.id,
+        settings: { ...defaultSettings, serverUrl: DEFAULT_GATEWAY_URL || serverUrl },
+        dataOwnerId: user.id,
+        authStatus,
+        user,
+      });
+      schedulePersistence(get(), true);
+      return;
+    }
+    set({ authStatus, user });
+  },
 
 
   setConnectionStatus: (connectionStatus) => set({ connectionStatus }),

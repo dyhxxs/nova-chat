@@ -1,7 +1,27 @@
 {
   "name": "nova-chat",
-  "version": "1.1.11",
+  "version": "1.1.13",
   "private": true,
+  "description": "Self-hosted multi-user Android/iOS AI chat client with a secure OpenAI-compatible model gateway.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dyhxxs/nova-chat.git"
+  },
+  "homepage": "https://github.com/dyhxxs/nova-chat",
+  "bugs": {
+    "url": "https://github.com/dyhxxs/nova-chat/issues"
+  },
+  "keywords": [
+    "ai-chat",
+    "android",
+    "ios",
+    "expo",
+    "react-native",
+    "self-hosted",
+    "openai-compatible",
+    "gateway",
+    "multi-user"
+  ],
   "workspaces": [
     "apps/*",
     "services/*",

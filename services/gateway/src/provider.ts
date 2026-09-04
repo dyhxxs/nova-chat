@@ -8,7 +8,9 @@ import type {
   TokenUsage,
 } from '@nova-chat/protocol';
 import type { AppConfig } from './config.js';
+import { attachmentTextPrompt } from './attachments.js';
 import type { AppDatabase, ProviderSettings, SessionPrincipal, StoredFile } from './database.js';
+import { AsyncSemaphore } from './limits.js';
 
 export type GenerationResult = {
   text: string;
@@ -32,6 +34,7 @@ export class ProviderError extends Error {
     readonly code: string,
     message: string,
     readonly retryable: boolean,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'ProviderError';
@@ -112,7 +115,16 @@ function endpoint(settings: ProviderSettings, route: string): string {
   return settings.apiBaseUrl.replace(/\/+$/, '') + (route.startsWith('/') ? route : '/' + route);
 }
 
-function providerErrorFromDetails(status: number, codeValue: unknown, messageValue: unknown): ProviderError {
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get('retry-after')?.trim();
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const milliseconds = Number.isFinite(seconds) ? seconds * 1_000 : Date.parse(value) - Date.now();
+  if (!Number.isFinite(milliseconds) || milliseconds <= 0) return undefined;
+  return Math.min(60_000, Math.ceil(milliseconds));
+}
+
+function providerErrorFromDetails(status: number, codeValue: unknown, messageValue: unknown, retryAfter?: number): ProviderError {
   const providerCode = String(codeValue ?? 'provider_request_error');
   const providerMessage = String(messageValue ?? '').trim().slice(0, 500);
   const details = `${providerCode} ${providerMessage}`.toLowerCase();
@@ -139,7 +151,21 @@ function providerErrorFromDetails(status: number, codeValue: unknown, messageVal
     return new ProviderError(502, imageParameter ? 'provider_image_parameter_unsupported' : 'provider_parameter_unsupported', imageParameter ? '第三方图片接口不支持当前返回格式参数。' : '第三方接口不支持当前请求参数。', false);
   }
   if (status === 401 || status === 403) return new ProviderError(502, 'provider_auth_error', providerMessage || '模型服务鉴权失败，请检查管理员配置的 API Key。', false);
-  if (status === 429) return new ProviderError(429, 'provider_rate_limited', providerMessage || '模型服务当前繁忙，请稍后重试。', true);
+  const concurrencyLimited = status === 429 && (
+    /concurren(?:cy|t).{0,80}(?:limit|exceed|account|request)/.test(details)
+    || /(?:limit|exceed|account|request).{0,80}concurren(?:cy|t)/.test(details)
+    || /并发.{0,40}(?:限制|上限|超出|请求)/.test(details)
+  );
+  if (concurrencyLimited) {
+    return new ProviderError(
+      429,
+      'provider_concurrency_limited',
+      '图片服务当前有其他任务占用生成名额，系统已自动等待重试；如果仍失败，请稍后再试。',
+      true,
+      retryAfter,
+    );
+  }
+  if (status === 429) return new ProviderError(429, 'provider_rate_limited', '模型服务当前请求过多，请稍后重试。', true, retryAfter);
   if (status === 408 || status === 409 || status === 425 || status >= 500) return new ProviderError(503, 'provider_unavailable', providerMessage || '模型服务暂时不可用，请稍后重试。', true);
   return new ProviderError(502, providerCode, providerMessage || '模型请求未能完成，请检查模型名称与服务配置。', false);
 }
@@ -152,7 +178,29 @@ async function providerError(response: Response): Promise<ProviderError> {
     response.status,
     data?.error?.code ?? data?.code,
     data?.error?.message ?? data?.message ?? raw.trim(),
+    retryAfterMs(response),
   );
+}
+
+function abortError(): DOMException {
+  return new DOMException('Aborted', 'AbortError');
+}
+
+async function waitFor(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw abortError();
+  if (ms <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function normalizedModels(settings: ProviderSettings): string[] {
@@ -177,8 +225,9 @@ function imageGenerationIntent(request: GenerateRequest): boolean {
   const imageGenerationAction = '(?:生成|制作|创建|绘制|画|作图|作|做|弄|整)';
   const actionThenSubject = new RegExp(`(?:${imageGenerationAction}\\s*(?:一个|一张|一幅|一副|个|张)?[^\\n]{0,80}?${imageSubject}|(?:来|给我)\\s*(?:一个|一张|一幅|一副|个|张)?\\s*${imageSubject})`, 'i');
   const compactIntent = /(?:生(?:图|图片|照片|相片|图像|头像|壁纸)|出图|配图|做图)/i;
+  const companionImageIntent = /(?:配(?:一张|一个|一幅|一副)?[^\n]{0,24}?(?:图|图片|照片|插图)|文字配图|图文|插图)/i;
   const englishIntent = /(?:create|generate|draw|make)\\s+(?:an?\\s+)?(?:image|picture|photo|illustration|wallpaper|avatar)/i;
-  if (compactIntent.test(latestUserMessage) || actionThenSubject.test(latestUserMessage) || englishIntent.test(latestUserMessage)) return true;
+  if (compactIntent.test(latestUserMessage) || companionImageIntent.test(latestUserMessage) || actionThenSubject.test(latestUserMessage) || englishIntent.test(latestUserMessage)) return true;
 
   // A generated image is an assistant message with no text. Older clients
   // used to drop that message from the context, so a follow-up such as
@@ -189,7 +238,46 @@ function imageGenerationIntent(request: GenerateRequest): boolean {
   const asksForExplanation = /(?:为什么|怎么|如何|是什么|哪种|是否|能否|能不能|可以吗|请问|分析|描述|识别|评价|提示词|prompt|[吗么][？?]$)/i;
   const editCue = /(?:不满意|不喜欢|不好看|不对|全身|半身|近景|远景|正面|侧面|背面|换成|改成|变成|调整|修改|优化|重做|重来|重新(?:生成)?|再来|换一个|换一张|换个|去掉|加上|保留|放大|缩小|拉远|拉近|镜头|构图|姿势|表情|发型|衣服|服装|背景|角度|颜色|比例|尺寸)/i;
   const actionableEditCue = /(?:换成|改成|变成|调整|修改|优化|重做|重来|重新(?:生成)?|再来|换一个|换一张|换个|去掉|加上|保留|放大|缩小|拉远|拉近|让(?:她|他|人物)|把.{0,20}(?:改|换|变))/i;
-  return editCue.test(latestUserMessage) && (!asksForExplanation.test(latestUserMessage) || actionableEditCue.test(latestUserMessage));
+  // Follow-ups are often short and omit the word “生成”, for example
+  // “把上一张补充完整” or “我想要上一张的全身图”. They still need to stay
+  // on the image route when a completed assistant image is in the context.
+  const imageReferenceCue = /(?:上一张|上一版|前一张|刚才(?:那张|的)?|这张(?:图|图片|照片)?|这个(?:图|图片|画面)|基于(?:上一张|上一版|这张)|参考(?:上一张|上一版|这张)|补充(?:图片|图像|画面|细节)?|完善(?:图片|图像|画面)?|完整(?:的?图片|图像|画面|图)?|继续(?:创作|生成|画|作图|做图|出图)?|同一个(?:人|人物|角色|场景)|保持(?:原来|上一张|同一))/i;
+  const isActionableContinuation = imageReferenceCue.test(latestUserMessage)
+    && (!asksForExplanation.test(latestUserMessage) || actionableEditCue.test(latestUserMessage));
+  return (editCue.test(latestUserMessage) || isActionableContinuation)
+    && (!asksForExplanation.test(latestUserMessage) || actionableEditCue.test(latestUserMessage) || isActionableContinuation);
+}
+
+function imageAndTextIntent(request: GenerateRequest): boolean {
+  const latestUserMessage = [...request.messages].reverse().find((message) => message.role === 'user')?.content.trim() ?? '';
+  if (!latestUserMessage || !imageGenerationIntent(request)) return false;
+
+  // “配图” by itself means image generation. When the same turn also asks for
+  // copy, a poem, an article, or another piece of writing, produce both a
+  // normal assistant response and a real image attachment instead of turning
+  // the whole request into an image prompt.
+  const companionImage = /(?:配(?:一张|一个|一幅|一副)?[^\n]{0,24}?(?:图|图片|照片|插图)|文字配图|图文|插图)/i;
+  const writingRequest = /(?:写|撰写|编写|创作|生成|整理|润色|改写|给我一段|给我一篇|文案|诗|文章|故事|说明|介绍|标题|内容)/i;
+  return companionImage.test(latestUserMessage) && writingRequest.test(latestUserMessage);
+}
+
+function companionImagePrompt(request: GenerateRequest): string {
+  const latestUserMessage = [...request.messages].reverse().find((message) => message.role === 'user')?.content.trim() ?? '';
+  const base = imagePrompt(request) || latestUserMessage;
+  return [
+    '请为下面的文字内容生成一张自然、完整的配图。',
+    '只生成画面，不要在图片中绘制文字、标题、Logo、水印、提示词或说明。',
+    `文字主题：${base.slice(0, 6_000)}`,
+  ].join('\n');
+}
+
+function companionTextInstructions(existing: string): string {
+  const instruction = [
+    '这是一个图文请求。请先正常完成用户要求的文字内容，再由系统附上一张配图。',
+    '只输出给用户看的正文，不要输出图片提示词、绘图参数、图片来源占位符、Markdown 图片链接或“〔图片：…〕”这类替代文本。',
+    '不要声称自己已经展示了图片，也不要把配图要求改写成提示词。',
+  ].join('\n');
+  return existing.trim() ? `${existing.trim()}\n\n${instruction}` : instruction;
 }
 
 function previousImageAssistantIndex(messages: GenerateRequest['messages'], beforeIndex: number): number {
@@ -392,11 +480,15 @@ async function imagePayloadFromResponse(data: any, signal: AbortSignal): Promise
 }
 
 export class ModelProvider {
+  private readonly imageSemaphore: AsyncSemaphore;
+
   constructor(
     private readonly config: AppConfig,
     private readonly database: AppDatabase,
     private readonly logger?: ProviderLogger,
-  ) {}
+  ) {
+    this.imageSemaphore = new AsyncSemaphore(config.maxConcurrentImageRequests);
+  }
 
   private validateSettings(settings: ProviderSettings): ProviderSettings {
     if (!settings.apiBaseUrl) throw new ProviderError(503, 'provider_not_configured', '管理员尚未配置模型服务地址。', false);
@@ -434,6 +526,9 @@ export class ModelProvider {
       // gpt-image-2 preference. A text model choice must remain unchanged in
       // the UI while the gateway performs this internal image route.
       const explicitImageModel = isImageModel(request.options.model) ? selectedModel : '';
+      if (imageAndTextIntent(request)) {
+        return this.generateTextAndImage(request, principal.id, settings, selectedModel, signal, onDelta);
+      }
       return this.generateImage(request, principal.id, settings, explicitImageModel, signal);
     }
 
@@ -497,52 +592,156 @@ export class ModelProvider {
     throw new ProviderError(502, 'provider_request_error', '模型请求未能完成。', false);
   }
 
+  private async generateTextAndImage(
+    request: GenerateRequest,
+    userId: string,
+    settings: ProviderSettings,
+    selectedModel: string,
+    signal: AbortSignal,
+    onDelta: DeltaHandler,
+  ): Promise<GenerationResult> {
+    // Generate the attachment first. This prevents a partially streamed text
+    // answer from ending in an error if the image provider is unavailable.
+    const imageResult = await this.generateImage(
+      request,
+      userId,
+      settings,
+      isImageModel(request.options.model) ? selectedModel : '',
+      signal,
+      companionImagePrompt(request),
+    );
+
+    const textCandidates = modelCandidates(settings, selectedModel, false).filter((model) => !isImageModel(model));
+    if (!textCandidates.length) {
+      return { ...imageResult, text: '已按你的要求生成文字和配图。' };
+    }
+
+    const textRequest: GenerateRequest = {
+      ...request,
+      options: {
+        ...request.options,
+        instructions: companionTextInstructions(request.options.instructions),
+      },
+    };
+    let lastError: unknown;
+    let emittedText = false;
+    const forwardDelta = (delta: string) => {
+      emittedText = true;
+      onDelta(delta);
+    };
+    for (const model of textCandidates) {
+      try {
+        const result = await this.generateTextWithModel(
+          textRequest,
+          userId,
+          settings,
+          model,
+          signal,
+          forwardDelta,
+          () => emittedText,
+        );
+        return {
+          ...result,
+          text: result.text.trim() ? result.text : '已按你的要求生成文字和配图。',
+          attachments: imageResult.attachments,
+          model: result.model,
+        };
+      } catch (error) {
+        if (signal.aborted) throw error;
+        lastError = error;
+        if (emittedText || !fallbackEligible(error)) break;
+      }
+    }
+
+    // A paired request should still deliver the image if the optional text
+    // pass is unavailable. Do not leak provider errors or expose a prompt to
+    // the user merely because the second provider call failed.
+    this.logger?.warn({
+      event: 'paired_text_generation_failed',
+      code: lastError instanceof ProviderError ? lastError.code : 'unknown',
+      message: safeDiagnosticMessage(lastError instanceof Error ? lastError.message : lastError),
+    }, 'paired text generation failed; returning image with fallback text');
+    return { ...imageResult, text: '已按你的要求生成配图。' };
+  }
+
   private async generateImage(
     request: GenerateRequest,
     userId: string,
     settings: ProviderSettings,
     selectedModel: string,
     signal: AbortSignal,
+    promptOverride?: string,
   ): Promise<GenerationResult> {
     const candidates = modelCandidates(settings, selectedModel, true);
     if (!candidates.length) throw new ProviderError(503, 'image_model_unavailable', '当前服务没有配置可用的图片模型（gpt-image-*）。', false);
-    const prompt = imagePrompt(request);
+    const prompt = promptOverride?.trim() || imagePrompt(request);
     if (!prompt) throw new ProviderError(400, 'image_prompt_required', '请先描述要生成的图片。', false);
+    const queuedAt = Date.now();
+    const releaseImageSlot = await this.imageSemaphore.acquire(signal);
+    const queueWaitMs = Date.now() - queuedAt;
+    if (queueWaitMs > 0) {
+      this.logger?.warn({ event: 'image_generation_dequeued', queueWaitMs }, 'queued image generation acquired a provider slot');
+    }
+
     let lastError: unknown;
     let omitResponseFormat = false;
-    for (const model of candidates) {
-      while (true) {
-        let responseStatus: number | undefined;
-        try {
-          const body: Record<string, unknown> = { model, prompt, n: 1, size: '1024x1024' };
-          if (!omitResponseFormat) body.response_format = 'b64_json';
-          const response = await fetch(endpoint(settings, '/images/generations'), {
-            method: 'POST',
-            headers: headersFor(settings),
-            body: JSON.stringify(body),
-            signal,
-          });
-          responseStatus = response.status;
-          if (!response.ok) throw await providerError(response);
-          const payload = await imagePayloadFromHttpResponse(response, signal);
-          if (payload.bytes.length > this.config.maxFileBytes) throw new ProviderError(413, 'image_too_large', '生成图片超过网关文件大小限制。', false);
-          const attachment = await this.storeGeneratedImage(userId, payload);
-          this.logger?.warn({ event: 'image_generation_succeeded', model, status: response.status, source: payload.source, bytes: payload.bytes.length }, 'image generation succeeded');
-          return { text: '', model, attachments: [attachment] };
-        } catch (error) {
-          lastError = error;
-          this.logger?.warn({ event: 'image_generation_attempt_failed', model, status: responseStatus, code: error instanceof ProviderError ? error.code : 'unknown', message: safeDiagnosticMessage(error instanceof Error ? error.message : error) }, 'image generation attempt failed');
-          if (signal.aborted) throw error;
-          if (error instanceof ProviderError && error.code === 'provider_image_parameter_unsupported' && !omitResponseFormat) {
-            omitResponseFormat = true;
-            continue;
+    let concurrencyRetryAttempts = 0;
+    try {
+      for (const model of candidates) {
+        while (true) {
+          let responseStatus: number | undefined;
+          try {
+            const body: Record<string, unknown> = { model, prompt, n: 1, size: '1024x1024' };
+            if (!omitResponseFormat) body.response_format = 'b64_json';
+            const response = await fetch(endpoint(settings, '/images/generations'), {
+              method: 'POST',
+              headers: headersFor(settings),
+              body: JSON.stringify(body),
+              signal,
+            });
+            responseStatus = response.status;
+            if (!response.ok) throw await providerError(response);
+            const payload = await imagePayloadFromHttpResponse(response, signal);
+            if (payload.bytes.length > this.config.maxFileBytes) throw new ProviderError(413, 'image_too_large', '生成图片超过网关文件大小限制。', false);
+            const attachment = await this.storeGeneratedImage(userId, payload);
+            this.logger?.warn({ event: 'image_generation_succeeded', model, status: response.status, source: payload.source, bytes: payload.bytes.length }, 'image generation succeeded');
+            return { text: '', model, attachments: [attachment] };
+          } catch (error) {
+            lastError = error;
+            this.logger?.warn({ event: 'image_generation_attempt_failed', model, status: responseStatus, code: error instanceof ProviderError ? error.code : 'unknown', message: safeDiagnosticMessage(error instanceof Error ? error.message : error) }, 'image generation attempt failed');
+            if (signal.aborted) throw error;
+            if (error instanceof ProviderError
+              && error.code === 'provider_concurrency_limited'
+              && concurrencyRetryAttempts < this.config.imageConcurrencyRetryCount) {
+              const retryNumber = concurrencyRetryAttempts + 1;
+              const exponentialDelay = this.config.imageConcurrencyRetryBaseMs * (2 ** concurrencyRetryAttempts);
+              const retryDelayMs = Math.min(
+                this.config.imageConcurrencyRetryMaxMs,
+                error.retryAfterMs ?? exponentialDelay,
+              );
+              concurrencyRetryAttempts = retryNumber;
+              this.logger?.warn({
+                event: 'image_generation_concurrency_retry_scheduled',
+                model,
+                retryNumber,
+                retryDelayMs,
+              }, 'provider image concurrency limit reached; waiting before retry');
+              await waitFor(retryDelayMs, signal);
+              continue;
+            }
+            if (error instanceof ProviderError && error.code === 'provider_image_parameter_unsupported' && !omitResponseFormat) {
+              omitResponseFormat = true;
+              continue;
+            }
+            if (!fallbackEligible(error)) throw error;
+            break;
           }
-          if (!fallbackEligible(error)) throw error;
-          break;
         }
       }
+      throw lastError ?? new ProviderError(503, 'image_model_unavailable', '图片模型暂时不可用，请稍后重试。', true);
+    } finally {
+      releaseImageSlot();
     }
-    throw lastError ?? new ProviderError(503, 'image_model_unavailable', '图片模型暂时不可用，请稍后重试。', true);
   }
 
   private async storeGeneratedImage(userId: string, payload: ImagePayload): Promise<AttachmentRef> {
@@ -567,11 +766,11 @@ export class ModelProvider {
     }
   }
 
-  private async fileForUser(fileId: string, userId: string): Promise<{ stored: StoredFile; dataUrl: string }> {
+  private async fileForUser(fileId: string, userId: string): Promise<{ stored: StoredFile; bytes: Buffer; dataUrl: string }> {
     const stored = this.database.getFile(fileId);
     if (!stored || stored.userId !== userId) throw new ProviderError(400, 'attachment_not_found', '附件不存在或无权访问。', false);
     const bytes = await readFile(stored.storagePath);
-    return { stored, dataUrl: `data:${stored.mimeType};base64,${bytes.toString('base64')}` };
+    return { stored, bytes, dataUrl: `data:${stored.mimeType};base64,${bytes.toString('base64')}` };
   }
 
   private async responsesBody(
@@ -659,8 +858,20 @@ export class ModelProvider {
       if (message.content.trim()) content.push({ type: 'text', text: message.content });
       for (const attachment of message.attachments) {
         const file = await this.fileForUser(attachment.id, userId);
-        if (file.stored.kind !== 'image') throw new ProviderError(400, 'documents_require_responses', 'PDF 附件需要管理员将协议设置为 Responses。', false);
-        content.push({ type: 'image_url', image_url: { url: file.dataUrl } });
+        if (file.stored.kind === 'image') {
+          content.push({ type: 'image_url', image_url: { url: file.dataUrl } });
+          continue;
+        }
+        const extracted = attachmentTextPrompt(file.stored.name, file.stored.mimeType, file.bytes);
+        if (!extracted) {
+          throw new ProviderError(
+            400,
+            'documents_require_responses',
+            '当前连接方式无法直接读取这种文件，请在管理端启用 Responses 协议，或先转为文本。',
+            false,
+          );
+        }
+        content.push({ type: 'text', text: extracted });
       }
       messages.push({ role: 'user', content });
     }

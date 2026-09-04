@@ -1,0 +1,24 @@
+name: Feature request
+description: 提议一个有助于更多人使用 Nova Chat 的功能
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题？
+      description: 请描述使用场景，以及目前哪里不方便。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你的建议
+      description: 请描述你希望 Nova Chat 如何工作。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案
+      description: 你是否尝试过其他解决办法？

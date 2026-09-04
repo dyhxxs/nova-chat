@@ -2,6 +2,7 @@ import type { Theme as NavigationTheme } from '@react-navigation/native';
 
 export type AppTheme = {
   dark: boolean;
+  fonts: { regular: string; medium: string; bold: string; heavy: string; mono: string };
   colors: {
     background: string;
     surface: string;
@@ -25,8 +26,22 @@ export type AppTheme = {
   navigation: NavigationTheme;
 };
 
+export const customFonts = { regular: 'Manrope', medium: 'ManropeMedium', bold: 'ManropeSemiBold', heavy: 'ManropeBold', mono: 'monospace' };
+export const systemFonts = { regular: 'System', medium: 'System', bold: 'System', heavy: 'System', mono: 'monospace' };
+
+export function applyFontTheme(theme: AppTheme, custom: boolean): AppTheme {
+  const fonts = custom ? customFonts : systemFonts;
+  return { ...theme, fonts, navigation: { ...theme.navigation, fonts: {
+    regular: { fontFamily: fonts.regular, fontWeight: '400' },
+    medium: { fontFamily: fonts.medium, fontWeight: '500' },
+    bold: { fontFamily: fonts.bold, fontWeight: '700' },
+    heavy: { fontFamily: fonts.heavy, fontWeight: '800' },
+  } } };
+}
+
 export const lightTheme: AppTheme = {
   dark: false,
+  fonts: customFonts,
   colors: {
     background: '#F7F8FA', surface: '#FFFFFF', surfaceElevated: '#FFFFFF', surfaceMuted: '#EFF1F5',
     text: '#17191D', textSecondary: '#5D626C', textTertiary: '#8C929E', border: '#E3E6EB',
@@ -37,12 +52,13 @@ export const lightTheme: AppTheme = {
   navigation: {
     dark: false,
     colors: { primary: '#6157E8', background: '#F7F8FA', card: '#FFFFFF', text: '#17191D', border: '#E3E6EB', notification: '#C9414A' },
-    fonts: { regular: { fontFamily: 'System', fontWeight: '400' }, medium: { fontFamily: 'System', fontWeight: '500' }, bold: { fontFamily: 'System', fontWeight: '700' }, heavy: { fontFamily: 'System', fontWeight: '800' } },
+    fonts: { regular: { fontFamily: customFonts.regular, fontWeight: '400' }, medium: { fontFamily: customFonts.medium, fontWeight: '500' }, bold: { fontFamily: customFonts.bold, fontWeight: '700' }, heavy: { fontFamily: customFonts.heavy, fontWeight: '800' } },
   },
 };
 
 export const darkTheme: AppTheme = {
   dark: true,
+  fonts: customFonts,
   colors: {
     background: '#0E0F13', surface: '#17191F', surfaceElevated: '#1D2027', surfaceMuted: '#242730',
     text: '#F3F4F7', textSecondary: '#B4B8C2', textTertiary: '#7F8591', border: '#2C3039',
@@ -53,6 +69,6 @@ export const darkTheme: AppTheme = {
   navigation: {
     dark: true,
     colors: { primary: '#8D85FF', background: '#0E0F13', card: '#17191F', text: '#F3F4F7', border: '#2C3039', notification: '#FF747D' },
-    fonts: { regular: { fontFamily: 'System', fontWeight: '400' }, medium: { fontFamily: 'System', fontWeight: '500' }, bold: { fontFamily: 'System', fontWeight: '700' }, heavy: { fontFamily: 'System', fontWeight: '800' } },
+    fonts: { regular: { fontFamily: customFonts.regular, fontWeight: '400' }, medium: { fontFamily: customFonts.medium, fontWeight: '500' }, bold: { fontFamily: customFonts.bold, fontWeight: '700' }, heavy: { fontFamily: customFonts.heavy, fontWeight: '800' } },
   },
 };

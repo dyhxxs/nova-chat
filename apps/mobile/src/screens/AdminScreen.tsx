@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { ThemedTextInput as TextInput } from '../components/ThemedText';
+import { ThemedText as Text } from '../components/ThemedText';
 import { Ionicons } from '@expo/vector-icons';
 import { DEFAULT_MODEL_ID } from '@nova-chat/protocol';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -142,7 +144,7 @@ export function AdminScreen({ navigation }: Props) {
         <Text style={[styles.label, { color: theme.colors.text }]}>API Key</Text>
         <TextInput value={form.apiKey} onChangeText={(apiKey) => setForm((item) => ({ ...item, apiKey }))} secureTextEntry autoCapitalize="none" placeholder={form.apiKeyPreview ? `已设置 ${form.apiKeyPreview}；留空保持不变` : '填写服务商 API Key'} placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
         <Text style={[styles.label, { color: theme.colors.text }]}>协议</Text>
-        <View style={styles.choices}><Choice value="responses" label="Responses（支持 PDF/工具）" selected={form.apiMode === 'responses'} onPress={(apiMode) => setForm((item) => ({ ...item, apiMode }))} /><Choice value="chat-completions" label="Chat Completions" selected={form.apiMode === 'chat-completions'} onPress={(apiMode) => setForm((item) => ({ ...item, apiMode }))} /></View>
+        <View style={styles.choices}><Choice value="responses" label="Responses（文件与工具）" selected={form.apiMode === 'responses'} onPress={(apiMode) => setForm((item) => ({ ...item, apiMode }))} /><Choice value="chat-completions" label="Chat Completions" selected={form.apiMode === 'chat-completions'} onPress={(apiMode) => setForm((item) => ({ ...item, apiMode }))} /></View>
         <Text style={[styles.label, { color: theme.colors.text }]}>鉴权方式</Text>
         <View style={styles.choices}>{(['bearer', 'api-key', 'none'] as const).map((value) => <Choice key={value} value={value} label={value === 'bearer' ? 'Bearer' : value === 'api-key' ? 'api-key' : '无鉴权'} selected={form.authMode === value} onPress={(authMode) => setForm((item) => ({ ...item, authMode }))} />)}</View>
         <Text style={[styles.label, { color: theme.colors.text }]}>默认模型</Text>
@@ -161,7 +163,7 @@ export function AdminScreen({ navigation }: Props) {
           <Switch value={!user.disabled} onValueChange={(enabled) => void changeUser(user, { disabled: !enabled })} trackColor={{ false: theme.colors.surfaceMuted, true: theme.colors.primarySoft }} thumbColor={!user.disabled ? theme.colors.primary : theme.colors.textTertiary} />
         </View>)}
       </View>
-      <Text style={[styles.footer, { color: theme.colors.textTertiary }]}>网页搜索、代码解释器、图片和 PDF 是否真正可用，取决于第三方 Responses 接口是否兼容对应能力。</Text>
+      <Text style={[styles.footer, { color: theme.colors.textTertiary }]}>网页搜索、代码解释器和附件读取能力，取决于第三方接口的兼容程度。</Text>
     </ScrollView>
     </KeyboardAwareView>
   );

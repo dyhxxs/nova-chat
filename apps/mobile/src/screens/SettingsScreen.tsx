@@ -1,5 +1,7 @@
 import { useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
+import { ThemedTextInput as TextInput } from '../components/ThemedText';
+import { ThemedText as Text } from '../components/ThemedText';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import type { ReasoningEffort, Verbosity } from '@nova-chat/protocol';
@@ -18,8 +20,8 @@ import type { RootStackParamList } from '../types';
 type Props = NativeStackScreenProps<RootStackParamList, 'Settings'>;
 const BUILT_IN_GATEWAY_URL = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim() ?? '';
 const efforts: { value: ReasoningEffort; label: string }[] = [
-  { value: 'none', label: '无' }, { value: 'low', label: '低' }, { value: 'medium', label: '中' },
-  { value: 'high', label: '高' }, { value: 'xhigh', label: '极高' },
+  { value: 'none', label: '直接' }, { value: 'low', label: '轻度' }, { value: 'medium', label: '中等' },
+  { value: 'high', label: '深度' }, { value: 'xhigh', label: '高强度' },
 ];
 const verbosities: { value: Verbosity; label: string }[] = [
   { value: 'low', label: '简洁' }, { value: 'medium', label: '适中' }, { value: 'high', label: '详细' },
@@ -105,7 +107,7 @@ export function SettingsScreen({ navigation }: Props) {
             </Pressable>
           </View>
           <View style={[styles.divider, { backgroundColor: theme.colors.border }]} />
-          <View style={styles.field}><Text style={[styles.label, { color: theme.colors.text }]}>推理强度</Text><View style={styles.chips}>{efforts.map((item) => <Chip key={item.value} {...item} selected={settings.reasoningEffort === item.value} onPress={(reasoningEffort) => update({ reasoningEffort })} />)}</View></View>
+          <View style={styles.field}><Text style={[styles.label, { color: theme.colors.text }]}>推理强度（中等为默认）</Text><View style={styles.chips}>{efforts.map((item) => <Chip key={item.value} {...item} selected={settings.reasoningEffort === item.value} onPress={(reasoningEffort) => update({ reasoningEffort })} />)}</View></View>
           <View style={[styles.divider, { backgroundColor: theme.colors.border }]} />
           <View style={styles.field}><Text style={[styles.label, { color: theme.colors.text }]}>回答详略</Text><View style={styles.chips}>{verbosities.map((item) => <Chip key={item.value} {...item} selected={settings.verbosity === item.value} onPress={(verbosity) => update({ verbosity })} />)}</View></View>
           <View style={[styles.divider, { backgroundColor: theme.colors.border }]} />

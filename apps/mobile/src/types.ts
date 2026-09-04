@@ -46,6 +46,18 @@ export type AppMessage = {
   requestedModel?: string;
   /** Model that actually produced the response, including gateway fallbacks or image routing. */
   model?: string;
+  /** Durable gateway request used to reconnect after a stream or app interruption. */
+  generationRequestId?: string;
+  /** Frozen generation controls for this individual answer. */
+  generationOptions?: {
+    reasoningEffort: ReasoningEffort;
+    verbosity: Verbosity;
+    maxOutputTokens: number;
+    webSearch: boolean;
+    codeInterpreter: boolean;
+  };
+  generationStartedAt?: number;
+  completedAt?: number;
 };
 
 export type Conversation = {

@@ -1,5 +1,6 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { ThemedText as Text } from './ThemedText';
 
 type State = { error: Error | null };
 export class AppErrorBoundary extends React.Component<React.PropsWithChildren, State> {

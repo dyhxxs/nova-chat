@@ -1,4 +1,5 @@
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, View } from 'react-native';
+import { ThemedText as Text } from '../components/ThemedText';
 import Constants from 'expo-constants';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -9,7 +10,7 @@ const items = [
   ['lock-closed-outline', '安全存储', '会话口令保存在 iOS Keychain / Android Keystore；正式环境只使用 HTTPS/WSS。'],
   ['phone-portrait-outline', '本地会话', '聊天记录默认只保存在当前设备，可随时在设置中清空。'],
   ['person-circle-outline', '个人信息', '支持修改显示名称、上传或移除头像，聊天消息会显示当前用户头像。'],
-  ['shield-checkmark-outline', '最小权限', '应用不申请相机、麦克风、通讯录或定位权限。'],
+  ['shield-checkmark-outline', '最小权限', '仅在你主动拍照或选择照片时申请相机和照片权限，不申请麦克风、通讯录或定位权限。'],
 ] as const;
 
 export function AboutScreen() {

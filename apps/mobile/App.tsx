@@ -6,8 +6,9 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
+import { Manrope_400Regular, Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold, useFonts } from '@expo-google-fonts/manrope';
 import { AppErrorBoundary } from './src/components/AppErrorBoundary';
-import { useAppTheme } from './src/hooks/useAppTheme';
+import { AppThemeProvider, useAppTheme } from './src/hooks/useAppTheme';
 import { AboutScreen } from './src/screens/AboutScreen';
 import { AdminScreen } from './src/screens/AdminScreen';
 import { ChatScreen } from './src/screens/ChatScreen';
@@ -24,18 +25,25 @@ void SplashScreen.preventAutoHideAsync();
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 function AppContent() {
-  const theme = useAppTheme();
+  const [fontsLoaded, fontError] = useFonts({
+    Manrope: Manrope_400Regular,
+    ManropeMedium: Manrope_500Medium,
+    ManropeSemiBold: Manrope_600SemiBold,
+    ManropeBold: Manrope_700Bold,
+  });
+  const theme = useAppTheme(fontsLoaded);
   const hydrated = useAppStore((state) => state.hydrated);
   const hydrate = useAppStore((state) => state.hydrate);
   const settings = useAppStore((state) => state.settings);
   const accessToken = useAppStore((state) => state.accessToken);
   const authStatus = useAppStore((state) => state.authStatus);
   const setAuthState = useAppStore((state) => state.setAuthState);
+  const restoreUserState = useAppStore((state) => state.restoreUserState);
   const clearSession = useAppStore((state) => state.clearSession);
   const updateSettings = useAppStore((state) => state.updateSettings);
 
   useEffect(() => { void hydrate(); }, [hydrate]);
-  useEffect(() => { if (hydrated) void SplashScreen.hideAsync(); }, [hydrated]);
+  useEffect(() => { if (hydrated && (fontsLoaded || fontError)) void SplashScreen.hideAsync(); }, [fontError, fontsLoaded, hydrated]);
   useEffect(() => {
     if (!hydrated || authStatus !== 'unknown') return;
     if (!accessToken || !settings.serverUrl.trim()) {
@@ -49,28 +57,31 @@ function AppContent() {
       fetchGatewayModels(settings.serverUrl, accessToken),
     ]).then(([user, catalog]) => {
       if (!active) return;
-      const currentModel = useAppStore.getState().settings.model;
-      const model = selectGatewayModel(currentModel, catalog.models, catalog.defaultModel);
-      if (model !== currentModel) updateSettings({ model });
-      setAuthState('authenticated', user);
+      return restoreUserState(user).then(() => {
+        if (!active) return;
+        const currentModel = useAppStore.getState().settings.model;
+        const model = selectGatewayModel(currentModel, catalog.models, catalog.defaultModel);
+        if (model !== currentModel) updateSettings({ model });
+      });
     }).catch(() => {
       if (active) void clearSession();
     });
     return () => { active = false; };
-  }, [accessToken, authStatus, clearSession, hydrated, setAuthState, settings.serverUrl, updateSettings]);
+  }, [accessToken, authStatus, clearSession, hydrated, restoreUserState, settings.serverUrl, updateSettings]);
 
-  if (!hydrated || authStatus === 'unknown') {
+  if (!hydrated || authStatus === 'unknown' || (!fontsLoaded && !fontError)) {
     return <View style={[styles.loading, { backgroundColor: theme.colors.background }]}><ActivityIndicator color={theme.colors.primary} /></View>;
   }
   const authenticated = authStatus === 'authenticated';
   return (
-    <NavigationContainer theme={theme.navigation}>
+    <AppThemeProvider customFontsLoaded={fontsLoaded}>
+      <NavigationContainer theme={theme.navigation}>
       <StatusBar style={theme.dark ? 'light' : 'dark'} />
       <Stack.Navigator screenOptions={{
         headerShadowVisible: false,
         headerStyle: { backgroundColor: theme.colors.background },
         headerTintColor: theme.colors.text,
-        headerTitleStyle: { fontWeight: '700' },
+        headerTitleStyle: { fontFamily: theme.fonts.bold, fontWeight: '700' },
         contentStyle: { backgroundColor: theme.colors.background },
         animation: 'slide_from_right',
       }}>
@@ -87,7 +98,8 @@ function AppContent() {
           </>
         )}
       </Stack.Navigator>
-    </NavigationContainer>
+      </NavigationContainer>
+    </AppThemeProvider>
   );
 }
 

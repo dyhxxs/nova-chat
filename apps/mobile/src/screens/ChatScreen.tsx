@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, Keyboard, Platform, Pressable, StyleSheet, Text, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { Alert, FlatList, Keyboard, Platform, Pressable, StyleSheet, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { ThemedText as Text } from '../components/ThemedText';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as DocumentPicker from 'expo-document-picker';
 import * as Haptics from 'expo-haptics';
@@ -16,7 +17,7 @@ import { buildConversationContext } from '../lib/conversationContext';
 import { uploadProgressPercent } from '../lib/uploadProgress';
 import { friendlyNetworkError } from '../lib/errorMessage';
 import { createId } from '../lib/id';
-import { startGeneration, type GenerationController } from '../services/chatClient';
+import { resumeGeneration, startGeneration, type GenerationController } from '../services/chatClient';
 import { fetchGatewayModels, GatewayApiError, uploadAttachment } from '../services/gatewayApiClient';
 import { useAppStore } from '../store/useAppStore';
 import type { AttachmentUploadState, PendingAttachment, RootStackParamList } from '../types';
@@ -35,9 +36,9 @@ class AttachmentUploadFailure extends Error {
 
 const MAX_ATTACHMENTS = 8;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
-const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const IMAGE_MIME_PREFIX = 'image/';
 
-const reasoningLabels: Record<string, string> = { none: '无', low: '低', medium: '中', high: '高', xhigh: '极高', max: '极高' };
+const reasoningLabels: Record<string, string> = { none: '直接回答', low: '轻度思考', medium: '中等思考', high: '深度思考', xhigh: '高强度思考', max: '高强度思考' };
 
 function imageMimeType(uri: string, provided?: string | null): string {
   const normalized = provided?.toLowerCase().trim();
@@ -55,9 +56,20 @@ function imageFileName(uri: string, provided: string | null | undefined, index: 
   return fromUri || `image-${Date.now()}-${index + 1}.jpg`;
 }
 
-function attachmentValidationError(name: string, mimeType: string, size?: number): string | undefined {
-  if (size !== undefined && size > MAX_FILE_BYTES) return `${name} 超过 25 MB，无法上传。`;
-  if (mimeType.startsWith('image/') && !IMAGE_MIME_TYPES.has(mimeType)) return `${name} 的格式暂不支持，请选择 JPG、PNG、WebP 或 GIF。`;
+function pickedMimeType(name: string, provided?: string | null): string {
+  const normalized = provided?.toLowerCase().split(';', 1)[0]?.trim();
+  if (normalized && normalized !== 'application/octet-stream' && normalized !== 'binary/octet-stream') return normalized === 'image/jpg' ? 'image/jpeg' : normalized;
+  const extension = name.toLowerCase().split(/[?#]/, 1)[0]?.split('.').pop() ?? '';
+  const byExtension: Record<string, string> = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', jpe: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', heic: 'image/heic', heif: 'image/heif', avif: 'image/avif', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff',
+    pdf: 'application/pdf', txt: 'text/plain', text: 'text/plain', md: 'text/markdown', markdown: 'text/markdown', csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json', jsonl: 'application/jsonl', geojson: 'application/geo+json', graphql: 'application/graphql', gql: 'application/graphql', xml: 'application/xml', html: 'text/html', htm: 'text/html', css: 'text/css', js: 'text/javascript', mjs: 'text/javascript', cjs: 'text/javascript', ts: 'text/typescript', tsx: 'text/typescript', jsx: 'text/javascript', py: 'text/x-python', java: 'text/x-java-source', kt: 'text/x-kotlin', sql: 'text/x-sql', srt: 'text/plain', vtt: 'text/vtt', ics: 'text/calendar', vcf: 'text/vcard', properties: 'text/plain', env: 'text/plain', yaml: 'application/yaml', yml: 'application/yaml', toml: 'application/toml', rtf: 'application/rtf',
+    doc: 'application/msword', dot: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', dotx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.template', docm: 'application/vnd.ms-word.document.macroenabled.12', xls: 'application/vnd.ms-excel', xlt: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xltx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.template', xlsm: 'application/vnd.ms-excel.sheet.macroenabled.12', ppt: 'application/vnd.ms-powerpoint', pps: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', potx: 'application/vnd.openxmlformats-officedocument.presentationml.template', pptm: 'application/vnd.ms-powerpoint.presentation.macroenabled.12', potm: 'application/vnd.ms-powerpoint.template.macroenabled.12', ppsx: 'application/vnd.openxmlformats-officedocument.presentationml.slideshow', ppsm: 'application/vnd.ms-powerpoint.slideshow.macroenabled.12', epub: 'application/epub+zip', mobi: 'application/x-mobipocket-ebook', odt: 'application/vnd.oasis.opendocument.text', ods: 'application/vnd.oasis.opendocument.spreadsheet', odp: 'application/vnd.oasis.opendocument.presentation',
+  };
+  return byExtension[extension] ?? normalized ?? 'application/octet-stream';
+}
+
+function attachmentValidationError(name: string, _mimeType: string, size?: number): string | undefined {
+  if (size !== undefined && size > MAX_FILE_BYTES) return `${name} 超过 25 MB，无法添加。`;
   return undefined;
 }
 
@@ -80,6 +92,7 @@ export function ChatScreen({ navigation }: Props) {
   const settings = useAppStore((state) => state.settings);
   const [availableModels, setAvailableModels] = useState<string[]>(() => (settings.model.trim() ? [settings.model.trim()] : []));
   const [optionsVisible, setOptionsVisible] = useState(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const accessToken = useAppStore((state) => state.accessToken);
   const currentUser = useAppStore((state) => state.user);
   const newConversation = useAppStore((state) => state.newConversation);
@@ -90,6 +103,7 @@ export function ChatScreen({ navigation }: Props) {
   const failAssistant = useAppStore((state) => state.failAssistant);
   const cancelAssistant = useAppStore((state) => state.cancelAssistant);
   const prepareRegeneration = useAppStore((state) => state.prepareRegeneration);
+  const bindAssistantGeneration = useAppStore((state) => state.bindAssistantGeneration);
   const setConnectionStatus = useAppStore((state) => state.setConnectionStatus);
   const updateSettings = useAppStore((state) => state.updateSettings);
 
@@ -152,6 +166,8 @@ export function ChatScreen({ navigation }: Props) {
   }, []);
 
   const scrollToBottom = useCallback((animated = true) => {
+    autoFollow.current = true;
+    setShowScrollButton(false);
     requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated }));
   }, []);
 
@@ -200,8 +216,7 @@ export function ChatScreen({ navigation }: Props) {
           style={styles.headerTitleButton}
         >
           <View style={styles.headerTitle}>
-            <Text numberOfLines={1} style={[styles.headerName, { color: theme.colors.text }]}>Nova</Text>
-            <Text numberOfLines={1} style={[styles.headerModel, { color: theme.colors.textTertiary }]}>{settings.model || '未选择模型'}</Text>
+            <Text numberOfLines={1} style={[styles.headerName, { color: theme.colors.text, fontFamily: theme.fonts.bold }]}>Nova</Text>
           </View>
           <Ionicons name="chevron-down" size={15} color={theme.colors.textSecondary} />
         </Pressable>
@@ -214,7 +229,7 @@ export function ChatScreen({ navigation }: Props) {
         </View>
       ),
     });
-  }, [navigation, newConversation, openOptions, settings.model, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary]);
+  }, [navigation, newConversation, openOptions, theme.colors.text, theme.colors.textSecondary]);
 
   const runGeneration = useCallback((conversationId: string, assistantMessageId: string): boolean => {
     const currentState = useAppStore.getState();
@@ -231,6 +246,18 @@ export function ChatScreen({ navigation }: Props) {
     const currentSettings = currentState.settings;
     const requestedModel = assistantMessage.requestedModel?.trim() || currentSettings.model.trim() || DEFAULT_MODEL_ID;
     const requestId = createId();
+    const frozenOptions = {
+      reasoningEffort: currentSettings.reasoningEffort,
+      verbosity: currentSettings.verbosity,
+      maxOutputTokens: currentSettings.maxOutputTokens,
+      webSearch: currentSettings.webSearch,
+      codeInterpreter: currentSettings.codeInterpreter,
+    };
+    if (!bindAssistantGeneration(conversationId, assistantMessageId, {
+      requestId,
+      options: frozenOptions,
+      startedAt: Date.now(),
+    })) return false;
     const request: GenerateRequest = {
       requestId,
       conversationId,
@@ -238,12 +265,8 @@ export function ChatScreen({ navigation }: Props) {
       messages: context,
       options: {
         model: requestedModel,
-        reasoningEffort: currentSettings.reasoningEffort,
-        verbosity: currentSettings.verbosity,
+        ...frozenOptions,
         instructions: currentSettings.instructions,
-        maxOutputTokens: currentSettings.maxOutputTokens,
-        webSearch: currentSettings.webSearch,
-        codeInterpreter: currentSettings.codeInterpreter,
       },
     };
 
@@ -256,15 +279,16 @@ export function ChatScreen({ navigation }: Props) {
       handlers: {
         onStarted: () => setConnectionStatus('online'),
         onDelta: (delta) => {
-          appendDelta(conversationId, assistantMessageId, delta);
+          appendDelta(conversationId, assistantMessageId, delta, requestId);
           if (isVisibleConversation(conversationId) && autoFollow.current) scrollToBottom(false);
         },
         onTextSnapshot: (text) => {
-          replaceAssistantContent(conversationId, assistantMessageId, text);
+          replaceAssistantContent(conversationId, assistantMessageId, text, requestId);
           if (isVisibleConversation(conversationId) && autoFollow.current) scrollToBottom(false);
         },
         onDone: (details) => {
           completeAssistant(conversationId, assistantMessageId, {
+            requestId,
             model: details.model,
             usage: details.usage,
             attachments: details.attachments,
@@ -277,11 +301,11 @@ export function ChatScreen({ navigation }: Props) {
           }
         },
         onCancelled: () => {
-          cancelAssistant(conversationId, assistantMessageId);
+          cancelAssistant(conversationId, assistantMessageId, requestId);
           removeActiveGeneration(conversationId, requestId);
         },
         onError: (error) => {
-          failAssistant(conversationId, assistantMessageId, friendlyNetworkError(error.message), error.retryable);
+          failAssistant(conversationId, assistantMessageId, friendlyNetworkError(error.message), error.retryable, requestId);
           removeActiveGeneration(conversationId, requestId);
           if (['network_error', 'connection_closed', 'hello_timeout', 'stream_stalled'].includes(error.code)) setConnectionStatus('offline');
           if (isVisibleConversation(conversationId)) {
@@ -293,7 +317,7 @@ export function ChatScreen({ navigation }: Props) {
     });
     activeGenerations.current.set(requestId, { controller, requestId, conversationId, messageId: assistantMessageId });
     return true;
-  }, [appendDelta, availableModels, cancelAssistant, completeAssistant, failAssistant, isVisibleConversation, removeActiveGeneration, replaceAssistantContent, scrollToBottom, setConnectionStatus]);
+  }, [appendDelta, availableModels, bindAssistantGeneration, cancelAssistant, completeAssistant, failAssistant, isVisibleConversation, removeActiveGeneration, replaceAssistantContent, scrollToBottom, setConnectionStatus]);
 
   const addPendingAttachments = useCallback((conversationId: string, additions: PendingAttachment[]) => {
     setPendingByConversation((current) => {
@@ -341,13 +365,53 @@ export function ChatScreen({ navigation }: Props) {
     }
   }, [addPendingAttachments, conversation, pendingAttachments.length]);
 
+  const takePhoto = useCallback(async () => {
+    if (!conversation) return;
+    if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+      Alert.alert('附件已满', '每条消息最多可以添加 8 个附件。');
+      return;
+    }
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('需要相机权限', '请在系统设置中允许 Nova 使用相机，才能拍照提问。');
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        quality: 1,
+        allowsEditing: false,
+      });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      const mimeType = imageMimeType(asset.uri, asset.mimeType);
+      const name = imageFileName(asset.uri, asset.fileName, 0);
+      const error = attachmentValidationError(name, mimeType, asset.fileSize);
+      if (error) {
+        Alert.alert('照片未添加', error);
+        return;
+      }
+      addPendingAttachments(conversation.id, [{
+        localId: createId(),
+        uri: asset.uri,
+        name,
+        mimeType,
+        size: asset.fileSize,
+        kind: 'image',
+      }]);
+      void Haptics.selectionAsync();
+    } catch (error) {
+      Alert.alert('无法拍照', error instanceof Error ? error.message : '相机发生错误，请重试。');
+    }
+  }, [addPendingAttachments, conversation, pendingAttachments.length]);
+
   const pickDocuments = useCallback(async () => {
     if (!conversation) return;
     const remaining = MAX_ATTACHMENTS - pendingAttachments.length;
     if (remaining <= 0) { Alert.alert('附件已满', '每条消息最多可以添加 8 个附件。'); return; }
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/pdf',
+        type: '*/*',
         copyToCacheDirectory: true,
         multiple: true,
       });
@@ -355,22 +419,19 @@ export function ChatScreen({ navigation }: Props) {
       const additions: PendingAttachment[] = [];
       const errors: string[] = [];
       result.assets.slice(0, remaining).forEach((asset) => {
-        const mimeType = asset.mimeType?.toLowerCase() === 'application/pdf' || asset.name.toLowerCase().endsWith('.pdf')
-          ? 'application/pdf'
-          : (asset.mimeType ?? 'application/octet-stream');
-        const error = mimeType !== 'application/pdf'
-          ? `${asset.name} 不是 PDF 文件。`
-          : attachmentValidationError(asset.name, mimeType, asset.size);
+        const mimeType = pickedMimeType(asset.name, asset.mimeType);
+        const error = attachmentValidationError(asset.name, mimeType, asset.size);
         if (error) errors.push(error);
-        else additions.push({ localId: createId(), uri: asset.uri, name: asset.name, mimeType, size: asset.size, kind: 'document' });
+        else additions.push({ localId: createId(), uri: asset.uri, name: asset.name, mimeType, size: asset.size, kind: mimeType.startsWith(IMAGE_MIME_PREFIX) ? 'image' : 'document' });
       });
       if (additions.length) addPendingAttachments(conversation.id, additions);
       if (result.assets.length > remaining) errors.push(`本次只添加了前 ${remaining} 个文件。`);
       if (errors.length) Alert.alert('部分文件未添加', errors.slice(0, 4).join('\n'));
     } catch (error) {
-      Alert.alert('无法选择 PDF', error instanceof Error ? error.message : '文档选择器发生错误，请重试。');
+      Alert.alert('无法添加文件', error instanceof Error ? error.message : '文件选择器发生错误，请重试。');
     }
   }, [addPendingAttachments, conversation, pendingAttachments.length]);
+
 
   const removePendingAttachment = useCallback((localId: string) => {
     if (!conversation) return;
@@ -479,7 +540,7 @@ export function ChatScreen({ navigation }: Props) {
     if (!active.length) return;
     for (const generation of active) {
       generation.controller.cancel();
-      cancelAssistant(generation.conversationId, generation.messageId);
+      cancelAssistant(generation.conversationId, generation.messageId, generation.requestId);
       removeActiveGeneration(generation.conversationId, generation.requestId);
     }
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -492,8 +553,68 @@ export function ChatScreen({ navigation }: Props) {
     }
   }, [conversation, failAssistant, prepareRegeneration, runGeneration]);
 
+  useEffect(() => {
+    const serverUrl = settings.serverUrl.trim();
+    if (!accessToken || !serverUrl) return;
+
+    for (const item of conversations) {
+      for (const message of item.messages) {
+        const requestId = message.generationRequestId?.trim();
+        if (message.role !== 'assistant' || message.status !== 'streaming' || !requestId) continue;
+        if (activeGenerations.current.has(requestId)) continue;
+        if ([...activeGenerations.current.values()].some((active) => active.messageId === message.id)) continue;
+
+        setConnectionStatus('checking');
+        const controller = resumeGeneration({
+          serverUrl,
+          accessToken,
+          requestId,
+          conversationId: item.id,
+          initialText: message.content,
+          handlers: {
+            onStarted: () => setConnectionStatus('online'),
+            onDelta: (delta) => {
+              appendDelta(item.id, message.id, delta, requestId);
+              if (isVisibleConversation(item.id) && autoFollow.current) scrollToBottom(false);
+            },
+            onTextSnapshot: (text) => {
+              replaceAssistantContent(item.id, message.id, text, requestId);
+              if (isVisibleConversation(item.id) && autoFollow.current) scrollToBottom(false);
+            },
+            onDone: (details) => {
+              completeAssistant(item.id, message.id, {
+                requestId,
+                model: details.model,
+                usage: details.usage,
+                attachments: details.attachments,
+              });
+              removeActiveGeneration(item.id, requestId);
+              setConnectionStatus('online');
+              if (isVisibleConversation(item.id)) scrollToBottom();
+            },
+            onCancelled: () => {
+              cancelAssistant(item.id, message.id, requestId);
+              removeActiveGeneration(item.id, requestId);
+            },
+            onError: (error) => {
+              failAssistant(item.id, message.id, friendlyNetworkError(error.message), error.retryable, requestId);
+              removeActiveGeneration(item.id, requestId);
+              if (error.code !== 'job_not_found') setConnectionStatus('offline');
+            },
+          },
+        });
+        activeGenerations.current.set(requestId, {
+          controller,
+          requestId,
+          conversationId: item.id,
+          messageId: message.id,
+        });
+      }
+    }
+  }, [accessToken, appendDelta, cancelAssistant, completeAssistant, conversations, failAssistant, isVisibleConversation, removeActiveGeneration, replaceAssistantContent, scrollToBottom, setConnectionStatus, settings.serverUrl]);
+
   useEffect(() => () => {
-    for (const active of activeGenerations.current.values()) active.controller.cancel();
+    for (const active of activeGenerations.current.values()) active.controller.dispose();
     activeGenerations.current.clear();
     clearScrollTimers();
   }, [clearScrollTimers]);
@@ -524,35 +645,20 @@ export function ChatScreen({ navigation }: Props) {
 
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    autoFollow.current = contentSize.height - (contentOffset.y + layoutMeasurement.height) < 120;
+    const nearBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height) < 120;
+    autoFollow.current = nearBottom;
+    setShowScrollButton(!nearBottom);
   };
 
   if (!conversation) return null;
+  const reasoningLabel = reasoningLabels[settings.reasoningEffort] ?? '中等思考';
   const content = (
     <>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="打开模型和对话设置"
-        onPress={openOptions}
-        style={({ pressed }) => [styles.optionsBar, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }, pressed && { opacity: 0.78 }]}
-      >
-        <View style={styles.optionsMain}>
-          <View style={[styles.optionsIcon, { backgroundColor: theme.colors.primarySoft }]}>
-            <Ionicons name="cube-outline" size={18} color={theme.colors.primary} />
-          </View>
-          <View style={styles.optionsText}>
-            <Text style={[styles.optionsLabel, { color: theme.colors.textSecondary }]}>当前模型</Text>
-            <Text numberOfLines={1} style={[styles.optionsModel, { color: theme.colors.text }]}>{settings.model || '未选择模型'}</Text>
-          </View>
-        </View>
-        <View style={styles.optionsMeta}>
-          <Text style={[styles.optionsEffort, { color: theme.colors.primary }]}>{reasoningLabels[settings.reasoningEffort] ?? settings.reasoningEffort}</Text>
-          <Ionicons name="options-outline" size={17} color={theme.colors.textSecondary} />
-          <Ionicons name="chevron-forward" size={17} color={theme.colors.textTertiary} />
-        </View>
-      </Pressable>
       {conversation.messages.length === 0 ? (
-        <EmptyState onSuggestion={(prompt) => { void send(prompt); }} />
+        <EmptyState
+          onTakePhoto={() => { void takePhoto(); }}
+          onSuggestion={(prompt) => { void send(prompt); }}
+        />
       ) : (
         <FlatList
           ref={listRef}
@@ -574,8 +680,19 @@ export function ChatScreen({ navigation }: Props) {
           onScroll={onScroll}
           scrollEventThrottle={80}
           onContentSizeChange={() => { scheduleScrollToBottom(false); }}
-          ListFooterComponent={<Text style={[styles.disclaimer, { color: theme.colors.textTertiary }]}>AI 可能会出错，重要信息请核实。</Text>}
+          ListFooterComponent={<Text style={[styles.disclaimer, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>AI 可能会出错，重要信息请核实。</Text>}
         />
+      )}
+      {showScrollButton && conversation.messages.length > 0 && (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="回到最新消息"
+          onPress={() => scrollToBottom()}
+          style={({ pressed }) => [styles.scrollButton, { backgroundColor: theme.colors.surfaceElevated, borderColor: theme.colors.border }, pressed && styles.pressed]}
+        >
+          <Ionicons name="arrow-down" size={18} color={theme.colors.primary} />
+          <Text style={[styles.scrollButtonText, { color: theme.colors.text, fontFamily: theme.fonts.medium }]}>最新消息</Text>
+        </Pressable>
       )}
       <Composer
         key={conversation.id}
@@ -583,6 +700,13 @@ export function ChatScreen({ navigation }: Props) {
         uploading={uploading}
         attachments={pendingAttachments}
         uploadStates={uploadStates}
+        reasoningLabel={reasoningLabel}
+        webSearch={settings.webSearch}
+        codeInterpreter={settings.codeInterpreter}
+        onOpenOptions={openOptions}
+        onToggleWebSearch={() => updateSettings({ webSearch: !settings.webSearch })}
+        onToggleCodeInterpreter={() => updateSettings({ codeInterpreter: !settings.codeInterpreter })}
+        onTakePhoto={() => { void takePhoto(); }}
         onAddImage={() => { void pickImages(); }}
         onAddDocument={() => { void pickDocuments(); }}
         onRemoveAttachment={removePendingAttachment}
@@ -621,16 +745,27 @@ const styles = StyleSheet.create({
   listContent: { paddingTop: 8, paddingBottom: 8, flexGrow: 1 },
   headerTitleButton: { flexDirection: 'row', alignItems: 'center', gap: 3, maxWidth: 235 },
   headerTitle: { alignItems: 'center', maxWidth: 215 },
-  headerName: { fontSize: 15, fontWeight: '700', maxWidth: 215 },
-  headerModel: { fontSize: 10, marginTop: 1, maxWidth: 215 },
+  headerName: { fontSize: 15, fontWeight: '800', letterSpacing: 0.1, maxWidth: 215 },
   headerActions: { flexDirection: 'row', marginRight: -6 },
-  optionsBar: { minHeight: 58, marginHorizontal: 12, marginTop: 8, marginBottom: 2, paddingHorizontal: 11, paddingVertical: 8, borderRadius: 15, borderWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  optionsMain: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 9 },
-  optionsIcon: { width: 34, height: 34, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  optionsText: { flex: 1, minWidth: 0 },
-  optionsLabel: { fontSize: 10, lineHeight: 14 },
-  optionsModel: { fontSize: 13, fontWeight: '700', marginTop: 1 },
-  optionsMeta: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingLeft: 8 },
-  optionsEffort: { fontSize: 12, fontWeight: '800' },
-  disclaimer: { textAlign: 'center', fontSize: 11, paddingVertical: 12, paddingHorizontal: 16 },
+  scrollButton: {
+    position: 'absolute',
+    right: 18,
+    bottom: 104,
+    zIndex: 10,
+    height: 38,
+    paddingHorizontal: 12,
+    borderRadius: 19,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  scrollButtonText: { fontSize: 12, fontWeight: '700' },
+  pressed: { opacity: 0.72, transform: [{ scale: 0.985 }] },
+  disclaimer: { textAlign: 'center', fontSize: 11, paddingVertical: 14, paddingHorizontal: 16 },
 });

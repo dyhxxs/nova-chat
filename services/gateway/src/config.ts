@@ -5,6 +5,9 @@ import { DEFAULT_CONTEXT_MESSAGES, DEFAULT_MODEL_ID } from '@nova-chat/protocol'
 const numberFromEnv = (fallback: number) =>
   z.preprocess((value) => (value === undefined || value === '' ? fallback : Number(value)), z.number().int().positive());
 
+const nonNegativeNumberFromEnv = (fallback: number) =>
+  z.preprocess((value) => (value === undefined || value === '' ? fallback : Number(value)), z.number().int().nonnegative());
+
 const booleanFromEnv = (fallback: boolean) => z.preprocess((value) => {
   if (value === undefined || value === '') return fallback;
   return String(value).toLowerCase() === 'true';
@@ -34,6 +37,10 @@ const configSchema = z.object({
   CORS_ORIGINS: z.string().default('*'),
   REQUESTS_PER_MINUTE: numberFromEnv(20),
   MAX_CONCURRENT_PER_DEVICE: numberFromEnv(2),
+  MAX_CONCURRENT_IMAGE_REQUESTS: numberFromEnv(100),
+  IMAGE_CONCURRENCY_RETRY_COUNT: nonNegativeNumberFromEnv(2),
+  IMAGE_CONCURRENCY_RETRY_BASE_MS: nonNegativeNumberFromEnv(5_000),
+  IMAGE_CONCURRENCY_RETRY_MAX_MS: numberFromEnv(20_000),
   MAX_HISTORY_CHARS: numberFromEnv(600_000),
   MAX_HISTORY_MESSAGES: numberFromEnv(DEFAULT_CONTEXT_MESSAGES),
   MAX_OUTPUT_TOKENS: numberFromEnv(32_768),
@@ -78,6 +85,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     corsOrigins: config.CORS_ORIGINS.split(',').map((origin) => origin.trim()).filter(Boolean),
     requestsPerMinute: config.REQUESTS_PER_MINUTE,
     maxConcurrentPerDevice: config.MAX_CONCURRENT_PER_DEVICE,
+    maxConcurrentImageRequests: config.MAX_CONCURRENT_IMAGE_REQUESTS,
+    imageConcurrencyRetryCount: config.IMAGE_CONCURRENCY_RETRY_COUNT,
+    imageConcurrencyRetryBaseMs: config.IMAGE_CONCURRENCY_RETRY_BASE_MS,
+    imageConcurrencyRetryMaxMs: config.IMAGE_CONCURRENCY_RETRY_MAX_MS,
     maxHistoryChars: config.MAX_HISTORY_CHARS,
     maxHistoryMessages: config.MAX_HISTORY_MESSAGES,
     maxOutputTokens: config.MAX_OUTPUT_TOKENS,

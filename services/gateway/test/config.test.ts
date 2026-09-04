@@ -9,6 +9,8 @@ describe('loadConfig', () => {
     expect(config.port).toBe(8787);
     expect(config.allowedModels).toEqual(['gpt-5.6-sol']);
     expect(config.adminAutoCreate).toBe(false);
+    expect(config.maxConcurrentImageRequests).toBe(100);
+    expect(config.imageConcurrencyRetryCount).toBe(2);
   });
   it('rejects an auto-created admin without an explicit password', () => {
     expect(() => loadConfig({ OPENAI_API_KEY: 'test', ADMIN_AUTO_CREATE: 'true' })).toThrow(/ADMIN_PASSWORD/);

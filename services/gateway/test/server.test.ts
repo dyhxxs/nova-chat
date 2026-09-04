@@ -91,6 +91,27 @@ describe('gateway server', () => {
     expect(response.body).not.toContain('legacy-friend-token');
   });
 
+  it('requires a valid conversation scope for durable job lookup and cancellation', async () => {
+    const app = await startServer();
+    const account = await bootstrap(app);
+    const requestId = '11111111-1111-4111-8111-111111111111';
+    const conversationId = '22222222-2222-4222-8222-222222222222';
+    const otherConversationId = '33333333-3333-4333-8333-333333333333';
+
+    const missingLookup = await app.inject({ method: 'GET', url: `/v1/chat/jobs/${requestId}`, headers: bearer(account.accessToken) });
+    expect(missingLookup.statusCode).toBe(400);
+    expect(missingLookup.json().error.code).toBe('invalid_conversation_scope');
+
+    const missingCancel = await app.inject({ method: 'POST', url: `/v1/chat/jobs/${requestId}/cancel`, headers: bearer(account.accessToken) });
+    expect(missingCancel.statusCode).toBe(400);
+    expect(missingCancel.json().error.code).toBe('invalid_conversation_scope');
+
+    const unknownLookup = await app.inject({ method: 'GET', url: `/v1/chat/jobs/${requestId}?conversationId=${conversationId}`, headers: bearer(account.accessToken) });
+    expect(unknownLookup.statusCode).toBe(404);
+    const unknownCancel = await app.inject({ method: 'POST', url: `/v1/chat/jobs/${requestId}/cancel?conversationId=${otherConversationId}`, headers: bearer(account.accessToken) });
+    expect(unknownCancel.statusCode).toBe(404);
+  });
+
   it('supports bootstrap, registration, login, session lookup, logout, and admin authorization', async () => {
     const app = await startServer();
     const statusBefore = await app.inject({ method: 'GET', url: '/v1/setup/status' });
@@ -145,6 +166,44 @@ describe('gateway server', () => {
     expect(afterLogout.statusCode).toBe(401);
   });
 
+  it('enforces the registration switch while keeping existing administrator login available', async () => {
+    const app = await startServer({ REGISTRATION_ENABLED: 'false' });
+    const status = await app.inject({ method: 'GET', url: '/v1/setup/status' });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({ needsBootstrap: true, registrationEnabled: false });
+
+    const admin = await bootstrap(app);
+    const blockedRegistration = await app.inject({
+      method: 'POST', url: '/v1/auth/register',
+      payload: { email: 'blocked@example.com', password: 'secure password 12345', displayName: 'Blocked', deviceId: 'blocked-test-device' },
+    });
+    expect(blockedRegistration.statusCode).toBe(403);
+    expect(blockedRegistration.json().error.code).toBe('registration_disabled');
+
+    const login = await app.inject({
+      method: 'POST', url: '/v1/auth/login',
+      payload: { email: 'ADMIN@example.com', password: 'admin password 12345', deviceId: 'admin-login-device' },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(login.json().user).toMatchObject({ id: admin.user.id, role: 'admin' });
+  });
+
+  it('authenticates the legacy app token without exposing it as an account session', async () => {
+    const app = await startServer({ APP_ACCESS_TOKEN: 'legacy-friend-token' });
+
+    const authorized = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: bearer('legacy-friend-token') });
+    expect(authorized.statusCode).toBe(200);
+    expect(authorized.json().user).toMatchObject({ id: 'legacy-access-token', role: 'user' });
+
+    const rejected = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: bearer('wrong-token') });
+    expect(rejected.statusCode).toBe(401);
+    expect(rejected.json().error.code).toBe('unauthorized');
+
+    const logout = await app.inject({ method: 'POST', url: '/v1/auth/logout', headers: bearer('legacy-friend-token') });
+    expect(logout.statusCode).toBe(200);
+    const stillAuthorized = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: bearer('legacy-friend-token') });
+    expect(stillAuthorized.statusCode).toBe(200);
+  });
   it('lets only admins manage provider configuration and never returns the provider API key', async () => {
     const app = await startServer();
     const admin = await bootstrap(app);
@@ -254,7 +313,14 @@ describe('gateway server', () => {
     const owner = await register(app, 4);
     const stranger = await register(app, 5);
 
-    const unsupportedPart = multipartFile('notes.txt', 'text/plain', Buffer.from('hello'));
+    const textPart = multipartFile('notes.txt', 'text/plain', Buffer.from('hello'));
+    const textUpload = await app.inject({
+      method: 'POST', url: '/v1/files', headers: { ...bearer(owner.accessToken), ...textPart.headers }, payload: textPart.payload,
+    });
+    expect(textUpload.statusCode).toBe(201);
+    expect(textUpload.json().attachment).toMatchObject({ mimeType: 'text/plain', kind: 'document' });
+
+    const unsupportedPart = multipartFile('archive.bin', 'application/octet-stream', Buffer.from([0x01, 0x02, 0x03]));
     const unsupported = await app.inject({
       method: 'POST', url: '/v1/files', headers: { ...bearer(owner.accessToken), ...unsupportedPart.headers }, payload: unsupportedPart.payload,
     });

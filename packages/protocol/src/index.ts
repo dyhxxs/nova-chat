@@ -117,6 +117,7 @@ export const startMessageSchema = z.object({
 export const cancelMessageSchema = z.object({
   type: z.literal('cancel'),
   requestId: z.string().uuid(),
+  conversationId: z.string().uuid(),
 });
 
 export const pingMessageSchema = z.object({ type: z.literal('ping') });

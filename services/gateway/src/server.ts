@@ -22,6 +22,7 @@ import { AppDatabase, type SessionPrincipal, type UserRecord } from './database.
 import { toPublicError } from './errors.js';
 import { ConcurrencyGate, SlidingWindowLimiter } from './limits.js';
 import { ModelProvider, type GenerationResult } from './provider.js';
+import { classifyAttachment, isSupportedMimeType, mimeTypeForName, normalizeMimeType } from './attachments.js';
 
 const credentialsSchema = z.object({
   email: z.string().trim().email().max(254),
@@ -40,6 +41,7 @@ const userPatchSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),
 }).refine((value) => Object.keys(value).length > 0, { message: 'No changes supplied' });
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+const jobScopeSchema = z.object({ conversationId: z.string().uuid() });
 
 const providerSchema = z.object({
   apiBaseUrl: z.string().url().max(2048),
@@ -430,23 +432,21 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     try {
       const part = await request.file({ limits: { fileSize: config.maxFileBytes, files: 1 } });
       if (!part) return reply.code(400).send({ error: { code: 'file_required', message: '请选择文件。', retryable: false } });
-      const kind = fileKind(part.mimetype.toLowerCase());
-      if (!kind) {
-        part.file.resume();
-        return reply.code(415).send({ error: { code: 'unsupported_file', message: '仅支持 JPG、PNG、WebP、GIF 图片和 PDF。', retryable: false } });
-      }
       const bytes = await part.toBuffer();
       if (!bytes.length || bytes.length > config.maxFileBytes) return reply.code(413).send({ error: { code: 'file_too_large', message: '文件为空或超过大小限制。', retryable: false } });
-      if (!matchesFileSignature(part.mimetype.toLowerCase(), bytes)) {
-        return reply.code(415).send({ error: { code: 'invalid_file_content', message: '文件内容与声明格式不一致。', retryable: false } });
+      const classified = classifyAttachment(part.filename, normalizeMimeType(part.mimetype), bytes);
+      if (!classified) {
+        const declaredMime = normalizeMimeType(part.mimetype);
+        const likelySupported = Boolean(mimeTypeForName(part.filename)) || isSupportedMimeType(declaredMime);
+        return reply.code(415).send({ error: { code: likelySupported ? 'invalid_file_content' : 'unsupported_file', message: '文件无法读取或暂不支持，请换一个文件后重试。', retryable: false } });
       }
       const fileId = randomUUID();
-      const storagePath = path.join(database.uploadsDir, `${fileId}${extensionFor(part.mimetype.toLowerCase())}`);
+      const storagePath = path.join(database.uploadsDir, fileId + classified.extension);
       await writeFile(storagePath, bytes, { flag: 'wx' });
       try {
         const stored = database.createFile({
-          id: fileId, userId: principal.id, name: safeFileName(part.filename), mimeType: part.mimetype.toLowerCase(),
-          size: bytes.length, kind, storagePath,
+          id: fileId, userId: principal.id, name: safeFileName(part.filename), mimeType: classified.mimeType,
+          size: bytes.length, kind: classified.kind, storagePath,
         });
         return reply.code(201).send({
           attachment: {
@@ -575,17 +575,31 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     return job;
   };
 
-  const findOwnedJob = (requestId: string, principal: Principal): GenerationJob | undefined => {
+  const findOwnedJob = (requestId: string, principal: Principal, conversationId: string): GenerationJob | undefined => {
     const job = jobs.get(requestId);
     if (!job || (job.principalId !== principal.id && principal.role !== 'admin')) return undefined;
+    // A request id is not sufficient to restore or cancel a generation. Keep
+    // the durable job scoped to the conversation that created it as well.
+    if (job.conversationId !== conversationId) return undefined;
     return job;
+  };
+
+  const parseJobScope = (request: FastifyRequest, reply: FastifyReply): string | undefined => {
+    const parsed = jobScopeSchema.safeParse(request.query);
+    if (!parsed.success) {
+      reply.code(400).send({ error: { code: 'invalid_conversation_scope', message: '缺少有效的会话标识。', retryable: false } });
+      return undefined;
+    }
+    return parsed.data.conversationId;
   };
 
   app.get('/v1/chat/jobs/:requestId', async (request, reply) => {
     const principal = requireUser(request, reply);
     if (!principal) return;
+    const conversationId = parseJobScope(request, reply);
+    if (!conversationId) return;
     const requestId = (request.params as { requestId?: string }).requestId ?? '';
-    const job = findOwnedJob(requestId, principal);
+    const job = findOwnedJob(requestId, principal, conversationId);
     if (!job) return reply.code(404).send({ error: { code: 'job_not_found', message: '生成任务不存在或已过期。', retryable: false } });
     return jobResponse(job);
   });
@@ -593,8 +607,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   app.post('/v1/chat/jobs/:requestId/cancel', async (request, reply) => {
     const principal = requireUser(request, reply);
     if (!principal) return;
+    const conversationId = parseJobScope(request, reply);
+    if (!conversationId) return;
     const requestId = (request.params as { requestId?: string }).requestId ?? '';
-    const job = findOwnedJob(requestId, principal);
+    const job = findOwnedJob(requestId, principal, conversationId);
     if (!job) return reply.code(404).send({ error: { code: 'job_not_found', message: '生成任务不存在或已过期。', retryable: false } });
     if (job.status === 'queued' || job.status === 'running') job.controller.abort();
     return { ok: true, status: job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled' ? job.status : 'cancelling' };
@@ -678,7 +694,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         if (message.type === 'ping') { send(socket, { type: 'pong' }); return; }
         if (message.type === 'hello') return;
         if (message.type === 'cancel') {
-          const job = findOwnedJob(message.requestId, principal);
+          const job = findOwnedJob(message.requestId, principal, message.conversationId);
           if (job && (job.status === 'queued' || job.status === 'running')) job.controller.abort();
           return;
         }

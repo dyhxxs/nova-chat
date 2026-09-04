@@ -353,13 +353,19 @@ export async function testProvider(serverUrl: string, accessToken: string, input
   return data.models;
 }
 
+function generationJobRoute(requestId: string, conversationId: string, action?: 'cancel'): string {
+  const route = `/v1/chat/jobs/${encodeURIComponent(requestId)}${action === 'cancel' ? '/cancel' : ''}`;
+  return `${route}?conversationId=${encodeURIComponent(conversationId)}`;
+}
+
 export function getGenerationJob(
   serverUrl: string,
   accessToken: string,
   requestId: string,
+  conversationId: string,
   signal?: AbortSignal,
 ): Promise<GenerationJob> {
-  return requestJson<GenerationJob>(serverUrl, `/v1/chat/jobs/${encodeURIComponent(requestId)}`, {
+  return requestJson<GenerationJob>(serverUrl, generationJobRoute(requestId, conversationId), {
     accessToken,
     timeoutMs: 15_000,
     signal,
@@ -370,10 +376,11 @@ export function cancelGenerationJob(
   serverUrl: string,
   accessToken: string,
   requestId: string,
+  conversationId: string,
 ): Promise<{ ok: true; status: GenerationJobStatus | 'cancelling' }> {
   return requestJson<{ ok: true; status: GenerationJobStatus | 'cancelling' }>(
     serverUrl,
-    `/v1/chat/jobs/${encodeURIComponent(requestId)}/cancel`,
+    generationJobRoute(requestId, conversationId, 'cancel'),
     { method: 'POST', accessToken, timeoutMs: 10_000 },
   );
 }

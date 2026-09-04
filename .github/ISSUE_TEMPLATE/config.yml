@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全部署与密钥问题
+    url: https://github.com/dyhxxs/nova-chat/blob/main/SECURITY.md
+    about: 提交公开 Issue 前，请先阅读安全文档并删除所有秘密信息。
+  - name: 部署与构建文档
+    url: https://github.com/dyhxxs/nova-chat/blob/main/docs/DEPLOYMENT.md
+    about: 查看 HTTPS/WSS、Docker、APK 和 iOS 构建说明。

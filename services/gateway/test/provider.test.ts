@@ -28,7 +28,7 @@ async function provider() {
   return new ModelProvider(config, database);
 }
 
-async function imageProvider() {
+async function imageProvider(env: NodeJS.ProcessEnv = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'nova-chat-image-provider-test-'));
   temporaryDirectories.push(dataDir);
   const config = loadConfig({
@@ -37,9 +37,11 @@ async function imageProvider() {
     SERVER_MASTER_KEY: 'provider-test-master-key-with-more-than-thirty-two-characters',
     OPENAI_API_KEY: 'provider-test-key',
     OPENAI_BASE_URL: 'https://provider.example/v1',
-    OPENAI_MODEL: 'gpt-image-1',
-    ALLOWED_MODELS: 'gpt-image-1,gpt-image-2',
+    OPENAI_MODEL: 'gpt-5.6-sol',
+    ALLOWED_MODELS: 'gpt-5.6-sol,gpt-image-1,gpt-image-2',
     PROVIDER_API_MODE: 'responses',
+    IMAGE_CONCURRENCY_RETRY_BASE_MS: '0',
+    ...env,
   });
   const database = new AppDatabase(config);
   databases.push(database);
@@ -184,6 +186,101 @@ describe('ModelProvider compatibility', () => {
     expect(result).toMatchObject({ model: 'gpt-image-1', text: '', attachments: [{ mimeType: 'image/png', kind: 'image' }] });
   });
 
+  it('maps an upstream account concurrency limit to a retryable Chinese error', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      error: { code: 'provider_rate_limited', message: 'Concurrency limit exceeded for account, please retry later' },
+    }, 429));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider({ IMAGE_CONCURRENCY_RETRY_COUNT: '0' });
+
+    let caught: unknown;
+    try {
+      await modelProvider.generate(
+        { ...request({ model: 'gpt-image-2' }), messages: [{ role: 'user', content: '生成一张猫的图片', attachments: [] }] },
+        { id: userId },
+        new AbortController().signal,
+        () => undefined,
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      status: 429,
+      code: 'provider_concurrency_limited',
+      retryable: true,
+      message: expect.stringContaining('图片服务'),
+    });
+    expect((caught as Error).message).not.toContain('Concurrency limit exceeded');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits and retries the same image model after an upstream concurrency response', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        error: { code: 'provider_rate_limited', message: 'Concurrency limit exceeded for account, please retry later' },
+      }, 429))
+      .mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+
+    const result = await modelProvider.generate(
+      { ...request({ model: 'gpt-image-2' }), messages: [{ role: 'user', content: '生成一张猫的图片', attachments: [] }] },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBody(fetchMock, 0).model).toBe('gpt-image-2');
+    expect(requestBody(fetchMock, 1).model).toBe('gpt-image-2');
+    expect(result).toMatchObject({ model: 'gpt-image-2', attachments: [{ kind: 'image' }] });
+  });
+
+  it('serializes image calls from different users sharing the administrator provider account', async () => {
+    let resolveFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => firstResponse)
+      .mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId, database } = await imageProvider({ MAX_CONCURRENT_IMAGE_REQUESTS: '1' });
+    const secondUser = database.createUser({ email: 'image-test-2@example.local', password: 'test-password', displayName: 'Image Test 2' });
+    const imageRequest = { ...request({ model: 'gpt-image-2' }), messages: [{ role: 'user' as const, content: '生成一张猫的图片', attachments: [] }] };
+
+    const first = modelProvider.generate(imageRequest, { id: userId }, new AbortController().signal, () => undefined);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const second = modelProvider.generate(imageRequest, { id: secondUser.id }, new AbortController().signal, () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFirst(jsonResponse({ data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }] }));
+    await first;
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await second;
+  });
+
+  it('cancels an image request while it is waiting in the shared provider queue', async () => {
+    let resolveFirst!: (response: Response) => void;
+    const firstResponse = new Promise<Response>((resolve) => { resolveFirst = resolve; });
+    const fetchMock = vi.fn().mockImplementationOnce(() => firstResponse);
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId, database } = await imageProvider({ MAX_CONCURRENT_IMAGE_REQUESTS: '1' });
+    const secondUser = database.createUser({ email: 'image-test-cancel@example.local', password: 'test-password', displayName: 'Image Test Cancel' });
+    const imageRequest = { ...request({ model: 'gpt-image-2' }), messages: [{ role: 'user' as const, content: '生成一张猫的图片', attachments: [] }] };
+
+    const first = modelProvider.generate(imageRequest, { id: userId }, new AbortController().signal, () => undefined);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    const queuedController = new AbortController();
+    const queued = modelProvider.generate(imageRequest, { id: secondUser.id }, queuedController.signal, () => undefined);
+    queuedController.abort();
+
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    resolveFirst(jsonResponse({ data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }] }));
+    await first;
+  });
+
   it.each([
     '生成照片',
     '帮我生成一张照片',
@@ -210,6 +307,31 @@ describe('ModelProvider compatibility', () => {
     expect(result).toMatchObject({ model: 'gpt-image-2', attachments: [{ mimeType: 'image/png', kind: 'image' }] });
   });
 
+  it('returns writing and a real image attachment for a text-plus-image request', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }],
+      }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'resp-paired', output_text: '春风从窗边经过，带来一段温柔的文字。' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+    const deltas: string[] = [];
+    const result = await modelProvider.generate(
+      { ...request({ model: 'gpt-5.6-sol' }), messages: [{ role: 'user', content: '写一段关于春天的短文，并配一张自然风格的图', attachments: [] }] },
+      { id: userId },
+      new AbortController().signal,
+      (delta) => deltas.push(delta),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/images/generations');
+    expect(requestBody(fetchMock, 0).prompt).toContain('不要在图片中绘制文字');
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe('https://provider.example/v1/responses');
+    expect(requestBody(fetchMock, 1).instructions).toContain('不要输出图片提示词');
+    expect(result).toMatchObject({ model: 'gpt-5.6-sol', text: '春风从窗边经过，带来一段温柔的文字。', attachments: [{ kind: 'image' }] });
+    expect(deltas).toEqual(['春风从窗边经过，带来一段温柔的文字。']);
+  });
+
   it.each([
     '不要生成图片',
     '为什么不能生成照片',
@@ -228,6 +350,33 @@ describe('ModelProvider compatibility', () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/responses');
   });
 
+
+  it('routes “补充图片的完整” to image generation instead of returning prompt text', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      data: [{ b64_json: 'aGVsbG8=', mime_type: 'image/png' }],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { provider: modelProvider, userId } = await imageProvider();
+    const previousImage = { id: '00000000-0000-4000-8000-000000000012', name: 'generated.png', mimeType: 'image/png', size: 100, kind: 'image' as const };
+    const result = await modelProvider.generate(
+      {
+        ...request({ model: 'gpt-5.6-sol' }),
+        messages: [
+          { role: 'user', content: '生成一张人物照片', attachments: [] },
+          { role: 'assistant', content: '', attachments: [previousImage] },
+          { role: 'user', content: '补充图片的完整', attachments: [] },
+        ],
+      },
+      { id: userId },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://provider.example/v1/images/generations');
+    expect(requestBody(fetchMock, 0).prompt).toContain('本次修改要求：补充图片的完整');
+    expect(result).toMatchObject({ attachments: [{ kind: 'image' }] });
+  });
 
   it('routes image follow-ups with an image reference to the image model and carries the prompt chain', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
@@ -381,4 +530,3 @@ describe('ModelProvider compatibility', () => {
     });
   });
 });
-

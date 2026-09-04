@@ -30,6 +30,74 @@ export class SlidingWindowLimiter {
   }
 }
 
+type SemaphoreWaiter = {
+  signal?: AbortSignal;
+  resolve: (release: () => void) => void;
+  reject: (reason: unknown) => void;
+  onAbort?: () => void;
+};
+
+function abortError(): DOMException {
+  return new DOMException('Aborted', 'AbortError');
+}
+
+/**
+ * A small FIFO semaphore for work shared by all authenticated users of one
+ * gateway process. Waiting callers can be cancelled without consuming a slot.
+ */
+export class AsyncSemaphore {
+  private readonly queue: SemaphoreWaiter[] = [];
+  private active = 0;
+
+  constructor(private readonly limit: number) {
+    if (!Number.isInteger(limit) || limit < 1) throw new Error('AsyncSemaphore limit must be a positive integer');
+  }
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) return Promise.reject(abortError());
+    if (this.active < this.limit) {
+      this.active += 1;
+      return Promise.resolve(this.releaseOnce());
+    }
+
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: SemaphoreWaiter = { signal, resolve, reject };
+      const onAbort = () => {
+        const index = this.queue.indexOf(waiter);
+        if (index >= 0) this.queue.splice(index, 1);
+        signal?.removeEventListener('abort', onAbort);
+        reject(abortError());
+      };
+      waiter.onAbort = onAbort;
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.queue.push(waiter);
+    });
+  }
+
+  private releaseOnce(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+      this.pump();
+    };
+  }
+
+  private pump() {
+    while (this.active < this.limit && this.queue.length) {
+      const waiter = this.queue.shift()!;
+      waiter.signal?.removeEventListener('abort', waiter.onAbort!);
+      if (waiter.signal?.aborted) {
+        waiter.reject(abortError());
+        continue;
+      }
+      this.active += 1;
+      waiter.resolve(this.releaseOnce());
+    }
+  }
+}
+
 export class ConcurrencyGate {
   private readonly active = new Map<string, number>();
   constructor(private readonly limit: number) {}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ConcurrencyGate, SlidingWindowLimiter } from '../src/limits.js';
+import { AsyncSemaphore, ConcurrencyGate, SlidingWindowLimiter } from '../src/limits.js';
 
 describe('SlidingWindowLimiter', () => {
   it('limits and resets requests', () => {
@@ -18,5 +18,38 @@ describe('ConcurrencyGate', () => {
     expect(gate.acquire('a')).toBe(false);
     gate.release('a');
     expect(gate.acquire('a')).toBe(true);
+  });
+});
+
+
+describe('AsyncSemaphore', () => {
+  it('queues work until the current permit is released', async () => {
+    const semaphore = new AsyncSemaphore(1);
+    const releaseFirst = await semaphore.acquire();
+    let acquiredSecond = false;
+    const second = semaphore.acquire().then((release) => {
+      acquiredSecond = true;
+      return release;
+    });
+
+    await Promise.resolve();
+    expect(acquiredSecond).toBe(false);
+    releaseFirst();
+    const releaseSecond = await second;
+    expect(acquiredSecond).toBe(true);
+    releaseSecond();
+  });
+
+  it('removes an aborted waiter without consuming capacity', async () => {
+    const semaphore = new AsyncSemaphore(1);
+    const releaseFirst = await semaphore.acquire();
+    const controller = new AbortController();
+    const waiting = semaphore.acquire(controller.signal);
+    controller.abort();
+
+    await expect(waiting).rejects.toMatchObject({ name: 'AbortError' });
+    releaseFirst();
+    const releaseNext = await semaphore.acquire();
+    releaseNext();
   });
 });

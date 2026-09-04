@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ThemedTextInput as TextInput } from '../components/ThemedText';
+import { ThemedText as Text } from '../components/ThemedText';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -79,7 +81,7 @@ export function ProfileScreen({ navigation }: Props) {
       }
       const mimeType = avatarMimeType(asset.uri, asset.mimeType);
       if (!mimeType.startsWith('image/')) {
-        Alert.alert('格式不支持', '头像仅支持 JPG、PNG、WebP 或 GIF 图片。');
+        Alert.alert('格式不支持', '无法读取这张图片，请换一张后重试。');
         return;
       }
       setPendingAvatar({

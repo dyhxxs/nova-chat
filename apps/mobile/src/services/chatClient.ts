@@ -13,7 +13,12 @@ export type StreamHandlers = {
   onError: (error: { code: string; message: string; retryable: boolean }) => void;
 };
 
-export type GenerationController = { cancel: () => void };
+export type GenerationController = {
+  /** Cancels the gateway job and marks the local response cancelled. */
+  cancel: () => void;
+  /** Detaches local listeners without cancelling the durable gateway job. */
+  dispose: () => void;
+};
 
 type StartOptions = {
   serverUrl: string;
@@ -159,7 +164,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
     }
     pollController = new AbortController();
     try {
-      const job = await getGenerationJob(options.serverUrl, options.accessToken, options.request.requestId, pollController.signal);
+      const job = await getGenerationJob(options.serverUrl, options.accessToken, options.request.requestId, options.request.conversationId, pollController.signal);
       if (handleJob(job)) return;
       if (!finished && !cancelled) pollTimer = setTimeout(() => { void pollOnce(); }, POLL_INTERVAL_MS);
     } catch (error) {
@@ -319,19 +324,139 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
       pollController?.abort();
       clearTimers();
       if (socket?.readyState === WebSocket.OPEN && startSent) {
-        try { socket.send(JSON.stringify({ type: 'cancel', requestId: options.request.requestId })); } catch { /* REST cancellation below. */ }
+        try { socket.send(JSON.stringify({ type: 'cancel', requestId: options.request.requestId, conversationId: options.request.conversationId })); } catch { /* REST cancellation below. */ }
         cancelCloseTimer = setTimeout(() => { if (!finished) socket?.close(); }, 1_200);
       } else {
         socket?.close();
       }
       // REST cancellation is required when the app has already lost its
       // WebSocket, otherwise the gateway would correctly keep working.
-      void cancelGenerationJob(options.serverUrl, options.accessToken, options.request.requestId).catch(() => undefined);
+      void cancelGenerationJob(options.serverUrl, options.accessToken, options.request.requestId, options.request.conversationId).catch(() => undefined);
       if (!finished) {
         finish();
         options.handlers.onCancelled();
       }
     },
+    dispose: finish,
+  };
+}
+
+type ResumeOptions = {
+  serverUrl: string;
+  accessToken: string;
+  requestId: string;
+  conversationId: string;
+  initialText?: string;
+  handlers: StreamHandlers;
+};
+
+/** Reattaches a persisted streaming message to the gateway's durable job snapshot. */
+export function resumeGeneration(options: ResumeOptions): GenerationController {
+  let finished = false;
+  let cancelled = false;
+  let deliveredText = options.initialText ?? '';
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollController: AbortController | undefined;
+  const pollingStartedAt = Date.now();
+  const POLL_INTERVAL_MS = 1_200;
+  const POLL_MAX_MS = 35 * 60_000;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = undefined;
+    pollController?.abort();
+    pollController = undefined;
+  };
+
+  const fail = (error: JobError) => {
+    if (finished) return;
+    finish();
+    options.handlers.onError(error);
+  };
+
+  const deliverSnapshot = (text: string | undefined) => {
+    if (typeof text !== 'string' || text === deliveredText) return;
+    if (text.startsWith(deliveredText)) {
+      const suffix = text.slice(deliveredText.length);
+      deliveredText = text;
+      if (suffix) options.handlers.onDelta(suffix);
+      return;
+    }
+    deliveredText = text;
+    options.handlers.onTextSnapshot?.(text);
+  };
+
+  const pollOnce = async () => {
+    if (finished || cancelled) return;
+    if (Date.now() - pollingStartedAt > POLL_MAX_MS) {
+      fail({ code: 'job_expired', message: '后台生成任务等待时间过长，请重新生成。', retryable: true });
+      return;
+    }
+    pollController = new AbortController();
+    try {
+      const job = await getGenerationJob(options.serverUrl, options.accessToken, options.requestId, options.conversationId, pollController.signal);
+      if (finished || cancelled) return;
+      if (job.conversationId !== options.conversationId) {
+        fail({
+          code: 'conversation_mismatch',
+          message: '后台任务与当前会话不一致，已停止恢复，请重新生成。',
+          retryable: false,
+        });
+        return;
+      }
+      options.handlers.onStarted?.();
+      deliverSnapshot(job.text);
+      if (job.status === 'queued' || job.status === 'running') {
+        pollTimer = setTimeout(() => { void pollOnce(); }, POLL_INTERVAL_MS);
+        return;
+      }
+      if (job.status === 'completed') {
+        finish();
+        options.handlers.onDone({
+          type: 'done',
+          requestId: options.requestId,
+          model: job.model,
+          responseId: job.responseId,
+          usage: job.usage,
+          attachments: job.attachments,
+        });
+        return;
+      }
+      if (job.status === 'cancelled') {
+        finish();
+        options.handlers.onCancelled();
+        return;
+      }
+      fail(job.error ?? { code: 'generation_failed', message: '生成任务失败。', retryable: true });
+    } catch (error) {
+      if (finished || cancelled || (error instanceof Error && error.name === 'AbortError')) return;
+      const apiError = error as { code?: string; message?: string; retryable?: boolean };
+      if (apiError.code === 'job_not_found') {
+        fail({
+          code: 'job_not_found',
+          message: '上次生成任务已过期或网关已重启，可以重新生成。',
+          retryable: true,
+        });
+        return;
+      }
+      pollTimer = setTimeout(() => { void pollOnce(); }, POLL_INTERVAL_MS);
+    } finally {
+      pollController = undefined;
+    }
+  };
+
+  void pollOnce();
+  return {
+    cancel: () => {
+      if (finished || cancelled) return;
+      cancelled = true;
+      void cancelGenerationJob(options.serverUrl, options.accessToken, options.requestId, options.conversationId).catch(() => undefined);
+      finish();
+      options.handlers.onCancelled();
+    },
+    dispose: finish,
   };
 }
 
