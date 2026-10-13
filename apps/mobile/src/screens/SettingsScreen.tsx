@@ -72,9 +72,9 @@ export function SettingsScreen({ navigation }: Props) {
   ]);
   const changeServer = () => Alert.alert('更换服务器', '将退出当前账户并返回登录页，设备上的本地对话不会被删除。', [
     { text: '取消', style: 'cancel' },
-    { text: '继续', style: 'destructive', onPress: () => { update({ serverUrl: '' }); void logout(settings.serverUrl, accessToken).catch(() => undefined).finally(() => clearSession()); } },
+    { text: '继续', style: 'destructive', onPress: () => { void logout(settings.serverUrl, accessToken).catch(() => undefined); void clearSession(''); } },
   ]);
-  const clear = () => Alert.alert('清空本地对话', '此操作无法撤销。', [{ text: '取消', style: 'cancel' }, { text: '清空', style: 'destructive', onPress: clearConversations }]);
+  const clear = () => Alert.alert('清空本地对话', '清空当前账号的对话列表，不会删除助手、故障恢复/迁移档案或已导出文件。此操作无法撤销。', [{ text: '取消', style: 'cancel' }, { text: '清空', style: 'destructive', onPress: clearConversations }]);
 
   return <>
     <KeyboardAwareView style={[styles.root, { backgroundColor: theme.colors.background }]}>
@@ -92,6 +92,7 @@ export function SettingsScreen({ navigation }: Props) {
           </View>
           {user?.role === 'admin' && <><View style={[styles.divider, { backgroundColor: theme.colors.border }]} /><SettingsLink icon="shield-checkmark-outline" title="管理控制台" subtitle="配置 API、模型和用户权限" onPress={() => navigation.navigate('Admin')} /></>}
           <View style={[styles.divider, { backgroundColor: theme.colors.border }]} /><SettingsLink icon="person-circle-outline" title="个人信息" subtitle="修改显示名称和头像" onPress={() => navigation.navigate('Profile')} />
+          <View style={[styles.divider, { backgroundColor: theme.colors.border }]} /><SettingsLink icon="lock-closed-outline" title="账户安全" subtitle="修改密码、查看与退出登录设备" onPress={() => navigation.navigate('Security')} />
           {!BUILT_IN_GATEWAY_URL && <><View style={[styles.divider, { backgroundColor: theme.colors.border }]} /><SettingsLink icon="server-outline" title="更换服务器" subtitle="退出当前账户并重新配置 Gateway" onPress={changeServer} /></>}
           <View style={[styles.divider, { backgroundColor: theme.colors.border }]} /><SettingsLink icon="log-out-outline" title="退出登录" subtitle="退出后可重新登录当前 Gateway" danger onPress={signOut} />
           <Pressable onPress={() => void loadModels()} disabled={busy} style={[styles.primaryButton, { backgroundColor: theme.colors.primary }, busy && styles.disabled]}><Ionicons name="pulse-outline" size={17} color="#fff" /><Text style={styles.primaryText}>{busy ? '连接中…' : '刷新模型列表'}</Text></Pressable>
@@ -120,8 +121,21 @@ export function SettingsScreen({ navigation }: Props) {
           <View style={styles.field}><Text style={[styles.label, { color: theme.colors.text }]}>系统指令</Text><TextInput value={settings.instructions} onChangeText={(instructions) => update({ instructions })} multiline maxLength={20_000} placeholder="定义助手的风格和规则" placeholderTextColor={theme.colors.textTertiary} textAlignVertical="top" style={[styles.input, styles.promptInput, { color: theme.colors.text, backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]} /></View>
         </SettingsSection>
 
-        <SettingsSection title="数据与帮助"><SettingsLink icon="information-circle-outline" title="关于 Nova" subtitle="安全架构、版本和功能边界" onPress={() => navigation.navigate('About')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="trash-outline" title="清空本地对话" subtitle="不会删除服务器账户" danger onPress={clear} /></SettingsSection>
-        <Text style={[styles.footer, { color: theme.colors.textTertiary }]}>Nova 是独立客户端，不代表任何模型服务商。工具、模型、隐私和计费取决于管理员配置的第三方服务。</Text>
+        <SettingsSection title="常用工具">
+          <View style={styles.field}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={[styles.labelInline, { color: theme.colors.text }]}>自动使用常用工具</Text>
+              <Switch accessibilityLabel="自动使用常用工具" value={settings.autoTools !== false} onValueChange={(autoTools) => update({ autoTools })} />
+            </View>
+            <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>天气、时间、计算器、单位换算、日期计算、参考汇率、联网搜索和网页阅读。升级网关后生效；无需逐个手动开启。</Text>
+            <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>每轮自动提供设备时区与服务器当前时间，不读取 GPS。天气请说明城市，例如“长沙明天天气怎么样”。</Text>
+            <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>查询会把必要的城市、搜索词或网址发送到公开数据服务；关闭后不使用网关内置工具。上游搜索/代码是独立开关，是否可用由模型服务商决定。</Text>
+            <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>天气为模型预报；汇率为带日期的参考价；免费搜索可能不可用。查询失败会说明，不会伪造结果。</Text>
+          </View>
+        </SettingsSection>
+
+        <SettingsSection title="数据与帮助"><SettingsLink icon="bookmark-outline" title="收藏夹" subtitle="保存重要回答，快速回到原对话" onPress={() => navigation.navigate('Saved')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="library-outline" title="个人资料库" subtitle="长期资料、中文检索与原文引用" onPress={() => navigation.navigate('Knowledge')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="pulse-outline" title="连接诊断" subtitle="无模型调用的连接检查与脱敏报告" onPress={() => navigation.navigate('Diagnostics')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="sparkles-outline" title="助手库" subtitle="自定义角色、可复用指令和开场草稿" onPress={() => navigation.navigate('Assistants')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="heart-outline" title="AI 陪伴" subtitle="日常聊天、角色性格与专属长相" onPress={() => navigation.navigate('Companions')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="folder-open-outline" title="数据与备份" subtitle="迁移对话与助手，查看存储及恢复副本" onPress={() => navigation.navigate('Data')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="information-circle-outline" title="关于 Nova" subtitle="安全架构、版本和功能边界" onPress={() => navigation.navigate('About')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="trash-outline" title="清空本地对话" subtitle="不会删除服务器账户" danger onPress={clear} /></SettingsSection>
+        <Text style={[styles.footer, { color: theme.colors.textTertiary }]}>Nova 是独立客户端，不代表任何模型服务商。内置工具由网关执行；上游工具、模型、隐私和计费取决于管理员配置的第三方服务。</Text>
       </ScrollView>
     </KeyboardAwareView>
     <ModelPickerModal visible={pickerVisible} models={models} selectedModel={settings.model} onSelect={(model) => update({ model })} onClose={() => setPickerVisible(false)} />

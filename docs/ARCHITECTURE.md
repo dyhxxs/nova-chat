@@ -183,3 +183,47 @@ Nova 不是官方 Codex 的完整复制。安全的代码代理至少还需要�
 - 长任务队列、恢复和审计。
 
 当前网关刻意不提供服务器 Shell/RCE。若将来增加代码执行，应作为独立沙箱服务设计，而不是把任意命令直接加到聊天网关。
+
+
+## 个人资料库数据流（1.1.17）
+
+客户端KnowledgeScreen通过认证REST调用/v1/knowledge系列接口；knowledgeRoutes复用现有requireUser和附件上传/文字解析，再调用KnowledgeStore。KnowledgeStore使用AppDatabase的同一SQLite连接，创建knowledge_documents与FTS5 knowledge_index，写入/更新使用事务，删除trigger同步移除索引。
+
+检索为NFKC归一化、中文双字词及英文数字词的词法检索，非embedding。1200码点分块、150码点重叠；账户过滤后按词匹配/标题加权排序，最多6个片段、每文档最多3个；query上限200字符、32个词。配额为每账户100份/200万UTF-16字符，每份12万。列表仅返回元数据，正文通过独立授权接口获取。
+
+GenerateRequest.options.knowledgeBase默认关闭。开启后ProviderAdapter用最新用户文字检索；无命中直接返回nova-local-retrieval，不进入模型调用。有命中把原文片段作为不可信JSON数据注入双协议上下文，强制关闭外部工具与图片路径；原文片段被发送给配置的上游模型，关闭工具不等于离线。
+
+REST结果、WebSocket done和网关进程内job snapshot携带同一KnowledgeResult；客户端校验schema并把来源快照与对应回答持久化。网关旧版本未回传合法来源时，客户端标记资料回答失败。任务快照不是跨进程持久队列，重启不会恢复活动请求。
+
+移动端来源展开只按普通Text显示原文，不执行文档HTML/Markdown；标准聊天备份采用白名单，排除来源快照。服务器资料删除不影响已存本地快照、原上传附件或外部备份。安全与保留边界见SECURITY第16节。
+
+## PDF 与资料草稿数据流（1.1.18）
+
+`knowledgeRoutes → PdfTextExtractor → pdfWorker.mjs → PDF.js legacy build`：每次解析独立工作线程，从内部附件路径有界读取，使用本地受限资源工厂加载字体/CMap，逐页流式提取正文和页码。结果通过Zod验证；整体成功后才进入KnowledgeStore事务。没有新数据表，PDF无文字页警告保留在正文，importInfo诊断返回客户端。Worker入口在源代码测试中直接运行，gateway tsconfig.allowJs将同一份mjs输出到dist；不能只部署tsc生成的部分TS模块而漏掉worker文件。
+
+资料草稿是现有账户快照v7的可选`knowledgeDraft`字段（向后读取兼容），包括title/text、可选原document id/updatedAt、稳定editId、随机revision和editedAt。草稿创建/修改/删除由store同步校验scope和expectedRevision，再进入现有450ms防抖/串行持久化。连续原生输入按editId校验编辑会话并合并最新store字段，避免React尚未重新渲染时丢失后续输入。`knowledgeDraftSavedRevision`仅运行时使用，用于显示精确版本落盘状态；应用后台/离开编辑页面请求flush。账户切换清可见状态后只恢复对应账户+网关，标准聊天/助手导出白名单不变。损坏草稿触发原始快照保留；保留失败则禁止覆盖。
+
+KnowledgeScreen直接订阅store草稿，收起或导航离开不会清空；同一账户已有草稿时不允许异步打开另一份覆盖它。服务器保存失败保留草稿，成功只清理提交时的revision；PUT仍使用原expectedUpdatedAt，冲突可导出或通过POST另存为新资料。客户端本地成功不等于网关资料保存，不新增后台同步或离线问答。
+
+
+## 回复朗读数据流（1.1.19）
+
+`MessageBubble → useReadAloud → SpeechControls确认 → SpeechController → speechDriver(.web) → 系统/浏览器语音服务`。仅complete assistant正文可选择；不新增网关接口、数据库字段、后台任务或麦克风采集。SpeechControls展示整理正文预览和语言/语速选项；原文仍由既有聊天快照保存，不单独持久化朗读队列或播放设置。
+
+`speechText`负责有界的常见Markdown清理和分段，`speechSource`核对账户范围/会话/原文一致性。`useReadAloud`订阅store、导航focus/blur和AppState，同步取消失效来源；render时的selected对象绑定本次确认，不能把旧确认用于后来的选择。StrictMode重放和卸载清理通过实际挂载Hook测试。
+
+`SpeechController`使用单调sequence、逐段finished门和单段定时器，await前后/每段复核source。仅当前段完成后以microtask提交下一段；停止请求串行，开始前等待stop确认，失败/超时不继续。Native driver在模块层串行stop，跨页面卸载/重挂载也不让旧停止取消新播放。
+
+原生`expo-speech ~57.0.2`适配器先共享等待getAvailableVoicesAsync，READY前不提交正文，规避Android模块初始化队列不能被stop清空的问题；显式语言优先匹配完整locale的声音，再同主语言，不存在则拒绝。Web适配器使用浏览器SpeechSynthesis API，避免Expo Web封装丢失异步错误；不等待voiceschanged以减少丢失用户手势的风险。平台的实际出声仍待设备验收。
+
+停播确认/READY/开始/完成分别限时3/10/10/180秒。所有语音状态与原文引用仅内存存在，错误对外脱敏；可能联网的语音服务隐私边界见SECURITY第18节。
+
+## 对话分支与提问改写数据流（1.1.20）
+
+`MessageBubble → useConversationFork → ConversationForkDialog确认 → store.forkConversation → createConversationFork → 既有schedulePersistence`
+
+纯函数conversationFork负责切点、已完成消息白名单深拷贝、尺寸限制、新ID和标题；rewrite只保留问题之前消息并填入新draft，continue包含所选回答。任务ID、生成控制、usage等不继承；附件仅复用引用。预览和实际创建均校验，超限拒绝。
+
+Hook监听store、导航focus/blur、AppState，临时选择绑定账户/Session/网关、活动会话及不可变来源对象。原文/草稿/身份变化或离开页面即清理；selected与ref同对象才可确认，先消费再操作，防旧Modal/双击。当前附件/上传阻止选择与确认。store再次检查身份、读取保护和会话数量后创建新会话并切换活动ID；既有朗读hook随会话切换停止。
+
+复用已有原生SQLite/Web账户快照与写队列；无新表、schema或版本迁移。失败保留内存副本并沿用数据错误/重试。后续发送仍用当前模型/工具设置及原有上下文预算；创建不调用网关模型、不启动后台job。

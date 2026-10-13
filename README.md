@@ -1,270 +1,149 @@
-# Nova Chat
-
 <p align="center">
-  <strong>把 OpenAI-compatible 模型带到手机上</strong><br>
-  自托管 · 多用户 · Android / iOS · 图片与附件 · 安全网关
+  <img src="docs/assets/nova-chat-hero.svg" alt="Nova Chat：陪你聊生活，也陪你把事做好。角色定制、角色照片、多模型聊天与自托管。" width="100%">
 </p>
 
-<p align="center">
-  <a href="https://github.com/dyhxxs/nova-chat">项目主页</a> ·
-  <a href="https://github.com/dyhxxs/nova-chat/releases">下载 Releases</a> ·
-  <a href="https://github.com/dyhxxs/nova-chat/issues">反馈问题</a> ·
-  <a href="https://github.com/dyhxxs/nova-chat/discussions">交流讨论</a>
-</p>
+<h1 align="center">Nova Chat</h1>
+<p align="center"><strong>有性格的 AI 陪伴，也有能把事做好的日常助手。</strong></p>
+<p align="center">自定义角色 · 情绪延续 · 角色照片 · 多模型聊天 · 个人资料库 · 自托管</p>
 
 <p align="center">
   <a href="https://github.com/dyhxxs/nova-chat/actions/workflows/ci.yml"><img src="https://github.com/dyhxxs/nova-chat/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://github.com/dyhxxs/nova-chat/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
-  <a href="https://github.com/dyhxxs/nova-chat"><img src="https://img.shields.io/github/stars/dyhxxs/nova-chat?style=flat" alt="GitHub stars"></a>
-  <a href="https://github.com/dyhxxs/nova-chat/network/members"><img src="https://img.shields.io/github/forks/dyhxxs/nova-chat?style=flat" alt="GitHub forks"></a>
+  <img src="https://img.shields.io/badge/source-v1.1.27-356859" alt="Source version 1.1.27">
+  <img src="https://img.shields.io/badge/Android-first-668975" alt="Android first">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-556b60" alt="MIT license"></a>
+  <a href="https://github.com/dyhxxs/nova-chat/stargazers"><img src="https://img.shields.io/github/stars/dyhxxs/nova-chat?style=flat&color=356859" alt="GitHub stars"></a>
 </p>
 
-<p align="center"><a href="#中文说明">中文</a> · <a href="#english">English</a></p>
+<p align="center">
+  <strong>简体中文</strong> · <a href="README.en.md">English</a><br>
+  <a href="#先认识-nova">功能亮点</a> · <a href="#五分钟开始">快速开始</a> · <a href="docs/COMPANION.md">陪伴指南</a> · <a href="docs/DEPLOYMENT.md">部署文档</a> · <a href="https://github.com/dyhxxs/nova-chat/issues">反馈与建议</a>
+</p>
 
-> 当前源码版本：**1.1.13**。欢迎 Star、Fork、提交 Issue，并把项目分享给需要“自建模型服务 + 手机聊天”的朋友。
+## 先认识 Nova
 
-## 中文说明
+想有人陪你说两句，也想在需要的时候认真解决一个问题。Nova 把这两种体验放进同一个应用：陪伴有自己的角色和聊天节奏，普通聊天保留模型、工具和资料问答的完整能力。
 
-### 这是什么？
+界面采用暖白与灰绿，给对话留出空间。你可以给角色取名、调整性格、设置长相，也可以接入自己的模型服务，把应用部署给自己或朋友使用。
 
-**Nova Chat** 是一个开源、自托管、多用户的 Android/iOS AI 聊天客户端。它把手机 App、一个负责认证和安全配置的 Gateway，以及任意兼容 OpenAI API 的第三方模型服务连接起来：
+### 一个有性格的聊天对象
 
-```text
-Android / iOS App
-       │ HTTPS / WSS
-       ▼
-Nova Gateway（账号、权限、限流、附件、模型配置）
-       │
-       ▼
-OpenAI-compatible Responses / Chat Completions API
-```
+默认角色 Lumi 是 **20 岁的女大二学生**，学中文，有自己的课程、朋友和小习惯；有点孤高，熟悉后偶尔露出一点腹黑。回复偏短，少些固定追问、长篇安慰和对话分析。
 
-管理员只需要在 Gateway 中配置第三方 API Base URL、API Key、协议和允许使用的模型；普通用户只使用 Nova 的服务器地址、账号和密码，不需要接触上游 Key。
+她会沿着当前聊天延续情绪：被冒犯时可以不高兴，道歉后也不必立刻热情起来。人物背景、说话方式和你允许使用的记忆都可以编辑，默认人设升级会保留你的自定义内容。
 
-> **重要声明**：Nova Chat 是第三方开源客户端，不是 OpenAI、ChatGPT、Codex 或任何模型供应商的官方产品。第三方服务返回的模型名称不代表官方授权、官方来源或完全相同的能力。请确认你拥有所使用的 API、模型和内容的合法使用权。
+这是一种基于人物设定和上下文的 AI 角色体验。情绪与日常经历由模型生成；实际风格会随所选模型变化。想了解怎么调出自己的角色，见 [陪伴与人设指南](docs/COMPANION.md)。
 
-### 为什么值得使用？
+### 从聊天延伸到角色照片
 
-- **手机优先**：一套 Expo / React Native 代码同时支持 Android 和 iOS。
-- **适合多人共享**：账号、角色、Session、注册开关、禁用用户和最后一个管理员保护都由 Gateway 统一管理。
-- **不暴露管理员 Key**：第三方 API Key 只保存在服务端，并使用 AES-256-GCM 加密；Session 只保存哈希。
-- **兼容多种服务商**：支持 Responses 和 Chat Completions 两种 OpenAI-compatible 接口模式。
-- **图片和附件**：支持图片、文本/代码、PDF、Office/OpenDocument、EPUB/MOBI 等常见附件；兼容时也支持图片生成。
-- **稳定流式聊天**：独立请求状态、WebSocket 心跳、REST 回退、断线和停滞处理、取消、重新生成和多会话并发。
-- **更少重复计费**：已经开始输出后不会盲目自动重放；文本模型和图片模型分别降级；共享图片账号默认最多允许 100 个图片请求并发；可按服务商实际配额调整。
-- **可部署**：支持 Docker Compose + Caddy/Nginx，适合家庭服务器、局域网和公网 HTTPS/WSS 部署。
+在“TA 的长相”里上传或替换参考照片，配上可选的外貌描述。聊天时说“拍张照片给我看看”，就能请求一张当前场景的角色图片。
 
-### 功能一览
+后续照片会继续使用参考脸，尽量延续人物外观。图片生成需要兼容的图片服务，人物一致性取决于模型能力；失败的照片请求支持修改描述后再试。
 
-| 能力 | 状态 | 说明 |
-|---|---:|---|
-| Android / iOS App | ✅ | Expo 57 + React Native，支持深色模式 |
-| 多用户与管理员控制台 | ✅ | 注册、登录、角色、禁用用户、Session 管理 |
-| Responses API | ✅ | 流式输出；工具可用性取决于上游服务商 |
-| Chat Completions API | ✅ | 适配只提供 `/chat/completions` 的服务商 |
-| 图片输入与图片生成 | ✅ | 取决于模型权限和服务商真实兼容程度 |
-| 文件附件 | ✅ | 图片、文本、代码、PDF、Office、电子书等 |
-| 多会话并发 | ✅ | 切换对话不会串写增量回复 |
-| 限流与并发控制 | ✅ | 用户/设备请求限制；图片共享账号最多 100 并发（可配置） |
-| Docker 部署 | ✅ | SQLite 数据卷、HTTPS/WSS 反向代理 |
-| Web Search / Code Interpreter | ⚠️ | 仅在上游 Responses 服务真正支持时可用 |
+### 陪你闲聊，也帮你处理正事
 
-### 下载、安装与分享
+| 你想做的事 | Nova 能提供什么 |
+| --- | --- |
+| 日常聊天 | 独立陪伴对话、角色定制、短口语风格与上下文中的情绪延续 |
+| 写作与思考 | 多模型普通聊天、自定义助手、流式回复、Markdown 与代码展示 |
+| 读自己的资料 | 个人资料库、文档导入、原文搜索、带来源片段的资料问答 |
+| 查实时信息 | 时间、天气、计算、单位、日期、参考汇率、搜索与公开网页阅读 |
+| 整理聊天 | 历史搜索、置顶、归档、草稿、收藏、独立对话分支与备份导入 |
+| 管理自己的服务 | 多用户账户、会话管理、模型白名单、Docker 部署与连接诊断 |
 
-#### 普通用户
+回复朗读使用设备或浏览器语音服务，可能联网。资料来源帮助你核对回答；天气、搜索等外部工具的可用性取决于数据服务。
 
-正式安装包会放在 GitHub 的 **[Releases](https://github.com/dyhxxs/nova-chat/releases)** 页面。下载前请确认：
+### 模型服务由你选择
 
-1. Release 版本与网关兼容；
-2. APK 的 SHA-256 校验值与 Release 说明一致；
-3. App 连接的是你信任的 HTTPS/WSS Gateway；
-4. 你知道该 Gateway 的管理员是谁，以及它使用的第三方模型服务。
+管理员可以分别配置 **普通聊天、陪伴聊天、陪伴图片** 三套服务。文字接口支持 OpenAI-compatible **Chat Completions / Responses**，支持 bearer、api-key 等鉴权方式。
 
-不要从聊天群里的未知 APK、临时内网穿透地址或来历不明的“破解包”安装。当前仓库默认不把 APK 直接塞进 Git 历史，而是建议通过 GitHub Releases 或支持断点续传的对象存储分发。
+填写完整 API 基础地址和 Key，获取可用模型，选择模型，再保存配置即可生效。保存后的地址和 Key 不回显，普通用户直接登录使用；每套服务可以采用不同的上游。
 
-#### 开发者或自托管管理员
+## 当前版本
 
-```powershell
-# 1. 获取源码
- git clone https://github.com/dyhxxs/nova-chat.git
- cd nova-chat
+当前源码为 **1.1.27 / Android versionCode 29**。本版重点更新默认人物、日常短回复、情绪延续、角色照片与管理员模型选择，纳入此前的资料库、账户安全、备份和聊天分支功能。
 
-# 2. 安装依赖并验证
- npm ci
- npm run verify
- npm run build
-```
+Android 已完成 MuMu 安装与实际聊天、照片验证。项目包含 iOS / Web 客户端代码；iOS 原生安装与完整真机覆盖仍需继续验证。
 
-要快速启动本地 Gateway：
+本次发布的是源码更新。安装包请以 [GitHub Releases](https://github.com/dyhxxs/nova-chat/releases) 中实际提供的版本与说明为准。详见 [1.1.27 更新说明](docs/RELEASE_1.1.27.md) 和 [更新记录](CHANGELOG.md)。
 
-```powershell
-Copy-Item services\gateway\.env.example services\gateway\.env
-# 编辑 services\gateway\.env，至少设置 SERVER_MASTER_KEY 与 ADMIN_BOOTSTRAP_TOKEN
-npm run dev:gateway
-```
+## 五分钟开始
 
-再开一个终端启动 App：
+需要 **Node.js 24** 与 npm。移动端开发使用 Expo，生产网关可以使用 Docker Compose。
 
-```powershell
-npm run dev:mobile
-```
-
-Android 模拟器访问宿主机通常使用 `http://10.0.2.2:8787`；真机请使用电脑在同一局域网中的 IP。公网部署必须使用 HTTPS/WSS，不能把开发机上的明文 HTTP 或临时 Tunnel 当作生产服务。
-
-### 生产部署
-
-最短路径：
-
-```bash
-cp services/gateway/.env.example services/gateway/.env
-# 设置强 SERVER_MASTER_KEY、ADMIN_BOOTSTRAP_TOKEN 等秘密
-mkdir -p data
-docker compose up -d --build
-```
-
-Compose 默认只把 Gateway 绑定到服务器本机 `127.0.0.1:8787`。请使用 Caddy、Nginx 或云负载均衡提供固定域名的 HTTPS/WSS；完整部署、备份、更新和分发说明见：
-
-- [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)：生产部署、HTTPS/WSS、构建与安装包分发
-- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)：数据流、并发、上下文和能力边界
-- [`SECURITY.md`](./SECURITY.md)：威胁模型、密钥和运维安全要求
-
-首次管理员配置的基本流程：
-
-1. 部署 Gateway 并确认 `/health` 正常；
-2. 用 App 连接 Gateway，完成管理员初始化或登录自动创建的管理员；
-3. 进入“管理控制台 → 模型服务”；
-4. 填写第三方 Base URL、API Key、协议和默认模型；
-5. 点击“获取模型”同步并发布允许的模型列表；
-6. 普通用户注册/登录后即可使用，不会看到管理员 Key。
-
-### 支持的附件、图片与工具
-
-- **附件输入**：图片、纯文本、代码、PDF、Office/OpenDocument、EPUB/MOBI 等；单文件默认上限 25 MB。
-- **图片生成**：用户可以直接说“生成图片 / 生图 / 画一张”，也可以手动选择图片模型；最终能力取决于上游是否开放 `/images/generations`。
-- **图片追问**：生成图片后可以继续要求修改风格、背景、构图或人物状态；客户端会保留必要的图片上下文。
-- **模型目录**：管理员从上游 `/models` 获取目录并发布白名单，普通用户只看到管理员允许的模型。
-- **Responses 工具**：Web Search、Code Interpreter、图片和 PDF 工具仅在第三方接口真实兼容时可用。
-
-能力矩阵：
-
-| 能力 | Gateway Responses | Gateway Chat Completions |
-|---|---:|---:|
-| 文字 / 流式回复 | ✅ | ✅ |
-| 多对话并发 | ✅ | ✅ |
-| 图片输入 | 取决于服务商 | 取决于服务商 |
-| 图片生成 | 取决于服务商 | 取决于服务商 |
-| PDF 输入 | 取决于服务商 | 通常不支持 |
-| Web Search | 取决于服务商 | 通常不支持 |
-| Code Interpreter | 取决于服务商 | 通常不支持 |
-| 管理员统一 Key | ✅ | ✅ |
-
-Nova Gateway **不会直接执行服务器 Shell 或任意远程代码**。它提供的是可靠的移动聊天、附件、多用户和兼容工具入口，不把未隔离的命令执行伪装成 Codex。
-
-### 构建移动端
-
-Expo bundle 验证：
-
-```powershell
-cd apps/mobile
-npx expo-doctor
-npx expo export --platform android --output-dir dist/android-bundle --clear
-npx expo export --platform ios --output-dir dist/ios-bundle --clear
-```
-
-Windows 本机构建 Android ARM64 Release APK：
-
-```powershell
-cd apps/mobile/android
-$env:ANDROID_HOME='D:\Android\Sdk'
-$env:ANDROID_SDK_ROOT='D:\Android\Sdk'
-.\gradlew.bat :app:assembleRelease -PreactNativeArchitectures=arm64-v8a
-```
-
-iOS 可用 EAS 或 macOS/Xcode 完成签名：
-
-```bash
-cd apps/mobile
-npx eas-cli build --platform ios --profile production
-```
-
-更多构建和发布注意事项见 [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)。
-
-### 常用命令
-
-```powershell
-npm run dev          # 同时启动 Gateway 与 Mobile
-npm run build        # 构建 Protocol 与 Gateway
-npm run typecheck    # TypeScript 检查
-npm run test         # 全部 workspace 测试
-npm run lint         # ESLint
-npm run verify       # typecheck + test + lint
-```
-
-### 安全底线
-
-- 永远不要提交 API Key、`SERVER_MASTER_KEY`、管理员密码、初始化口令、Session Token 或真实 `.env`。
-- 生产环境只使用 HTTPS/WSS；不要直接公开 8787 端口。
-- 为第三方模型账户设置预算、速率限制和费用告警。
-- 定期备份 SQLite 数据卷，并将数据库和主密钥分开控制访问权限。
-- APK/IPA 使用 GitHub Releases、应用商店或支持 HTTPS + Range 断点续传的对象存储分发。
-- 应用商店和公开介绍必须明确 Nova Chat 是第三方客户端。
-
-### 参与项目与分享
-
-如果这个项目对你有帮助：
-
-1. 点一个 **Star**，帮助更多人发现项目；
-2. Fork 后提交改进或新适配；
-3. 在 [Issues](https://github.com/dyhxxs/nova-chat/issues) 报告可复现问题；
-4. 分享项目主页，而不是只转发一个无法验证来源的 APK；
-5. 提供服务商兼容性、设备型号和日志时，务必删除所有 Key、Token、密码和个人数据。
-
-欢迎阅读 [`CONTRIBUTING.md`](./CONTRIBUTING.md) 后参与开发。
-
-## English
-
-### What is Nova Chat?
-
-Nova Chat is an open-source, self-hosted, multi-user AI chat client for Android and iOS. It connects a mobile app to a secure Gateway and any provider that exposes an OpenAI-compatible Responses or Chat Completions API.
-
-Administrators configure the upstream Base URL, API key, protocol and model allowlist once in the Gateway. Regular users only need a Nova Gateway URL and their own account; they never need to see the upstream key.
-
-> Nova Chat is an independent third-party project. It is not an official OpenAI, ChatGPT, Codex or model-provider product. Verify your provider permissions, costs and legal right to use the models and content.
-
-### Highlights
-
-- Self-hosted Gateway for accounts, roles, sessions, rate limits and model policy.
-- Android/iOS mobile app built with Expo and React Native.
-- Streaming chat with WebSocket plus REST fallback, cancellation and concurrent conversations.
-- Image input, image generation when supported, and follow-up image context.
-- Uploads for images, text/code, PDF, Office/OpenDocument files and ebooks.
-- Responses and Chat Completions compatibility, depending on the upstream provider.
-- Encrypted server-side API-key storage, hashed sessions and per-device limits.
-- Docker Compose deployment with HTTPS/WSS reverse-proxy guidance.
-
-### Quick start
-
-```bash
+~~~bash
 git clone https://github.com/dyhxxs/nova-chat.git
 cd nova-chat
 npm ci
+npm run build
+~~~
+
+### 1. 启动自己的网关
+
+复制环境配置：
+
+~~~bash
+# macOS / Linux
+cp services/gateway/.env.example services/gateway/.env
+~~~
+
+~~~powershell
+# Windows PowerShell
+Copy-Item services/gateway/.env.example services/gateway/.env
+~~~
+
+编辑 .env，设置随机的 SERVER_MASTER_KEY 和 ADMIN_BOOTSTRAP_TOKEN，再启动：
+
+~~~bash
+npm run dev:gateway
+~~~
+
+### 2. 打开客户端
+
+另开一个终端：
+
+~~~bash
+npm run dev:mobile
+~~~
+
+Android 开发模拟器通常通过 http://10.0.2.2:8787 访问电脑网关；真机使用同一局域网中的电脑地址。自行构建分发包时，可通过 EXPO_PUBLIC_GATEWAY_URL 预设自己的 HTTPS 网关，普通用户只需登录。
+
+### 3. 配置模型，开始聊天
+
+1. 连接网关，通过首次管理员初始化流程建立管理员账户。
+2. 在管理控制台配置普通聊天服务；地址通常包含 /v1，以服务商说明为准。
+3. 在“AI 陪伴专用服务”分别配置陪伴聊天与陪伴照片。
+4. 获取可用模型、选择并保存。进入 AI 陪伴即可创建或编辑角色。
+
+生产环境使用固定 HTTPS/WSS 网关。Docker 部署、反向代理和 Android 构建步骤见 [部署指南](docs/DEPLOYMENT.md)。
+
+## 项目结构
+
+~~~text
+apps/mobile        React Native / Expo 客户端
+services/gateway   Fastify 网关、账户、模型路由、资料库与工具
+packages/protocol  共享协议与默认角色定义
+docs               部署、使用、人设与升级文档
+scripts            构建、验证、诊断与分发工具
+~~~
+
+聊天记录保存在本设备，原生端使用 SQLite；账户、角色和模型配置由网关管理。请求的消息、附件和必要上下文会发送到所选模型服务，自托管并不等于模型推理离线。
+
+## 验证与贡献
+
+~~~bash
 npm run verify
 npm run build
-```
+node scripts/check_release_metadata.mjs
+~~~
 
-Copy `services/gateway/.env.example` to `services/gateway/.env`, set strong secrets, start the Gateway with `npm run dev:gateway`, then start the mobile app with `npm run dev:mobile`. For production, use Docker Compose behind Caddy/Nginx and never expose secrets or an unauthenticated development server.
+当前版本通过 **782 项自动化检查**：移动端 437、网关 287、脚本 58，另通过全工作区类型检查、lint 和构建。CI 会执行验证、构建以及 Android / iOS 的 Expo bundle 导出；bundle 导出不等于原生设备安装验证。
 
-- [Deployment guide](./docs/DEPLOYMENT.md)
-- [Architecture](./docs/ARCHITECTURE.md)
-- [Security policy](./SECURITY.md)
-- [Contributing](./CONTRIBUTING.md)
-- [Releases](https://github.com/dyhxxs/nova-chat/releases)
-- [Issues](https://github.com/dyhxxs/nova-chat/issues)
+欢迎通过 [Issues](https://github.com/dyhxxs/nova-chat/issues) 提交反馈，或通过 Pull Request 改进角色体验、模型兼容、界面与文档。
 
-### Sharing safely
+- [使用与数据指南](docs/USABILITY_AND_SECURITY.md)
+- [陪伴、人设与模型配置](docs/COMPANION.md)
+- [架构说明](docs/ARCHITECTURE.md)
+- [存储迁移与升级](docs/STORAGE_MIGRATION.md)
+- [安全策略](SECURITY.md)
 
-Please share the GitHub project page or a signed GitHub Release rather than an untrusted APK mirror. Check SHA-256 values, use HTTPS/WSS in production, and remove API keys, passwords, tokens and private user data from bug reports.
-
-## License
-
-MIT
+代码采用 [MIT License](LICENSE)。如果 Nova 对你有用，欢迎点一颗 Star，让更多人发现它。

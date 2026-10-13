@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
-import { Alert, FlatList, Modal, Pressable, StyleSheet, View, type GestureResponderEvent } from 'react-native';
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { useAccountTask } from '../hooks/useAccountTask';
+import { Alert, FlatList, ScrollView, Modal, Pressable, StyleSheet, View, type GestureResponderEvent } from 'react-native';
 import { ThemedTextInput as TextInput } from '../components/ThemedText';
 import { ThemedText as Text } from '../components/ThemedText';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -7,6 +8,9 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { KeyboardAwareView } from '../components/KeyboardAwareView';
 import { useAppTheme } from '../hooks/useAppTheme';
+import { conversationPreview, createConversationSelector, type HistoryFilter } from '../lib/conversationHistory';
+import { conversationMarkdown, serializeConversationBackup } from '../lib/conversationBackup';
+import { shareTextFile } from '../services/backupFiles';
 import { useAppStore } from '../store/useAppStore';
 import type { Conversation, RootStackParamList } from '../types';
 
@@ -24,18 +28,15 @@ function formatDate(timestamp: number): string {
   return date.toLocaleDateString('zh-CN', options);
 }
 
-function conversationPreview(conversation: Conversation): string {
-  const latest = [...conversation.messages].reverse().find((message) => message.content.trim() || message.attachments.length);
-  if (!latest) return '还没有消息';
-  if (latest.content.trim()) return latest.content.replace(/\s+/g, ' ').trim();
-  const imageCount = latest.attachments.filter((attachment) => attachment.kind === 'image').length;
-  const documentCount = latest.attachments.length - imageCount;
-  return [imageCount ? `${imageCount} 张图片` : '', documentCount ? `${documentCount} 个文件` : ''].filter(Boolean).join('、');
-}
-
 export function HistoryScreen({ navigation }: Props) {
   const theme = useAppTheme();
   const [query, setQuery] = useState('');
+  const deferredQuery = useDeferredValue(query);
+  const { scope, busy: exporting, run: runExport } = useAccountTask();
+  const selectHistory = useMemo(() => createConversationSelector(), [scope]);
+  const [filter, setFilter] = useState<HistoryFilter>('active');
+  const [exportError, setExportError] = useState('');
+  useEffect(() => { setExportError(''); }, [scope]);
   const [menuConversationId, setMenuConversationId] = useState<string>();
   const [renameConversationId, setRenameConversationId] = useState<string>();
   const [renameValue, setRenameValue] = useState('');
@@ -45,18 +46,15 @@ export function HistoryScreen({ navigation }: Props) {
   const remove = useAppStore((state) => state.deleteConversation);
   const createNew = useAppStore((state) => state.newConversation);
   const rename = useAppStore((state) => state.renameConversation);
+  const togglePinned = useAppStore((state) => state.toggleConversationPinned);
+  const toggleArchived = useAppStore((state) => state.toggleConversationArchived);
+  const persistenceError = useAppStore((state) => state.persistenceError);
 
-  const filtered = useMemo(() => {
-    const needle = query.replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!needle) return conversations;
-    return conversations.filter((conversation) => {
-      const haystack = [
-        conversation.title,
-        ...conversation.messages.map((message) => message.content),
-      ].join('\n').toLowerCase();
-      return haystack.includes(needle);
-    });
-  }, [conversations, query]);
+  const filtered = useMemo(() => selectHistory(conversations, deferredQuery, filter), [selectHistory, conversations, deferredQuery, filter]);
+  const exportConversation = (conversation: Conversation, format: 'json' | 'md') => runExport(async (isCurrent) => {
+    setMenuConversationId(undefined); setExportError('');
+    await shareTextFile(format === 'json' ? serializeConversationBackup([conversation]) : conversationMarkdown(conversation), format, 'conversations', isCurrent);
+  }, (error) => setExportError(error instanceof Error ? error.message : '导出失败，请重试。'));
 
   const menuConversation = conversations.find((conversation) => conversation.id === menuConversationId);
   const renameConversation = conversations.find((conversation) => conversation.id === renameConversationId);
@@ -73,7 +71,7 @@ export function HistoryScreen({ navigation }: Props) {
 
   const choose = (id: string) => {
     setActive(id);
-    navigation.navigate('Chat');
+    navigation.popTo('Chat');
   };
 
   const confirmDelete = (conversation: Conversation) => {
@@ -107,12 +105,19 @@ export function HistoryScreen({ navigation }: Props) {
 
   return (
     <KeyboardAwareView style={[styles.container, { backgroundColor: theme.colors.background }]}>
+      <View style={styles.utilityRow}>
+        <Text style={[styles.utilityHint, { color: theme.colors.textSecondary }]}>{conversations.reduce((count, item) => count + item.messages.filter((message) => message.role === 'assistant' && message.starred).length, 0)} 条收藏回答</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="打开收藏夹" onPress={() => navigation.navigate('Saved')} style={({ pressed }) => [styles.savedLink, { backgroundColor: theme.colors.primarySoft }, pressed && styles.pressed]}>
+          <Ionicons name="bookmark" size={14} color={theme.colors.primary} />
+          <Text style={[styles.savedLinkText, { color: theme.colors.primary }]}>收藏夹</Text>
+        </Pressable>
+      </View>
       <View style={[styles.search, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
         <Ionicons name="search" size={18} color={theme.colors.textTertiary} />
         <TextInput
           value={query}
           onChangeText={setQuery}
-          placeholder="搜索标题和消息内容"
+          placeholder="搜索正文、模型或附件名称"
           placeholderTextColor={theme.colors.textTertiary}
           style={[styles.searchInput, { color: theme.colors.text }]}
           returnKeyType="search"
@@ -125,15 +130,25 @@ export function HistoryScreen({ navigation }: Props) {
         )}
       </View>
 
+      <View style={styles.filters}>
+        {([{ value: 'active', label: '最近' }, { value: 'pinned', label: '置顶' }, { value: 'archived', label: '归档' }, { value: 'all', label: '全部' }] as const).map((item) => (
+          <Pressable key={item.value} accessibilityRole="tab" accessibilityState={{ selected: filter === item.value }} accessibilityLabel={item.label} onPress={() => setFilter(item.value)} style={[styles.filterChip, { backgroundColor: filter === item.value ? theme.colors.primarySoft : theme.colors.surface }]}>
+            <Text style={{ color: filter === item.value ? theme.colors.primary : theme.colors.textSecondary, fontWeight: '700', fontSize: 12 }}>{item.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {!!persistenceError && <Pressable accessibilityRole="button" onPress={() => navigation.navigate('Data')}><Text style={[styles.error, { color: theme.colors.danger }]}>{persistenceError} 点击打开数据与备份。</Text></Pressable>}
+      {!!exportError && <Text accessibilityRole="alert" style={[styles.error, { color: theme.colors.danger }]}>{exportError}</Text>}
+      {exporting && <Text style={[styles.error, { color: theme.colors.textSecondary }]}>正在准备导出…</Text>}
       <View style={styles.summaryRow}>
         <View>
-          <Text style={[styles.summaryTitle, { color: theme.colors.text }]}>{query.trim() ? `${filtered.length} 个结果` : `${conversations.length} 个对话`}</Text>
+          <Text style={[styles.summaryTitle, { color: theme.colors.text }]}>{query !== deferredQuery ? '正在筛选…' : query.trim() ? `${filtered.length} 个结果` : `${filtered.length} 个对话`}</Text>
           <Text style={[styles.summarySubtitle, { color: theme.colors.textTertiary }]}>{runningCount ? `${runningCount} 个回答仍在后台生成` : '对话只保存在当前设备'}</Text>
         </View>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="新建对话"
-          onPress={() => { createNew(); navigation.navigate('Chat'); void Haptics.selectionAsync(); }}
+          onPress={() => { createNew(); navigation.popTo('Chat'); void Haptics.selectionAsync(); }}
           style={({ pressed }) => [styles.newButton, { backgroundColor: theme.colors.primary }, pressed && styles.pressed]}
         >
           <Ionicons name="add" size={19} color="#FFFFFF" />
@@ -152,7 +167,7 @@ export function HistoryScreen({ navigation }: Props) {
               <Ionicons name="chatbubbles-outline" size={25} color={theme.colors.textTertiary} />
             </View>
             <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>没有找到相关对话</Text>
-            <Text style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}>换个关键词试试，搜索会同时匹配消息正文。</Text>
+            <Text style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}>切换筛选或换个关键词试试。搜索同时匹配正文、模型和附件名称。</Text>
           </View>
         )}
         renderItem={({ item }) => {
@@ -178,9 +193,11 @@ export function HistoryScreen({ navigation }: Props) {
               <View style={styles.rowBody}>
                 <View style={styles.titleLine}>
                   <Text numberOfLines={1} style={[styles.title, { color: theme.colors.text }]}>{item.title}</Text>
+                  {!!item.pinned && <Ionicons name="pin" size={13} color={theme.colors.primary} />}
+                  {!!item.archived && <Ionicons name="archive-outline" size={13} color={theme.colors.textTertiary} />}
                   {isActive && <Text style={[styles.activeBadge, { color: theme.colors.primary, backgroundColor: theme.colors.surfaceElevated }]}>当前</Text>}
                 </View>
-                <Text numberOfLines={2} style={[styles.preview, { color: theme.colors.textSecondary }]}>{conversationPreview(item)}</Text>
+                <Text numberOfLines={2} style={[styles.preview, { color: theme.colors.textSecondary }]}>{item.draft?.trim() ? `草稿：${item.draft}` : conversationPreview(item)}</Text>
                 <View style={styles.rowStats}>
                   <Text style={[styles.statText, { color: theme.colors.textTertiary }]}>{item.messages.length} 条消息</Text>
                   {streaming && (
@@ -213,18 +230,40 @@ export function HistoryScreen({ navigation }: Props) {
           <Pressable style={[styles.actionSheet, { backgroundColor: theme.colors.surfaceElevated }]} onPress={keepActionSheetOpen}>
             <View style={[styles.sheetHandle, { backgroundColor: theme.colors.border }]} />
             <Text numberOfLines={1} style={[styles.sheetTitle, { color: theme.colors.text }]}>{menuConversation?.title}</Text>
+            <ScrollView bounces={false} contentContainerStyle={{ paddingBottom: 8 }}>
             {menuConversation && (
               <>
                 <Pressable onPress={() => openRename(menuConversation)} style={({ pressed }) => [styles.sheetAction, pressed && styles.pressed]}>
                   <View style={[styles.sheetActionIcon, { backgroundColor: theme.colors.surfaceMuted }]}><Ionicons name="pencil-outline" size={19} color={theme.colors.text} /></View>
                   <Text style={[styles.sheetActionText, { color: theme.colors.text }]}>重命名</Text>
                 </Pressable>
+                <Pressable accessibilityRole="button" onPress={() => { togglePinned(menuConversation.id); setMenuConversationId(undefined); }} style={({ pressed }) => [styles.sheetAction, pressed && styles.pressed]}>
+                  <View style={[styles.sheetActionIcon, { backgroundColor: theme.colors.surfaceMuted }]}><Ionicons name="pin-outline" size={19} color={theme.colors.text} /></View>
+                  <Text style={[styles.sheetActionText, { color: theme.colors.text }]}>{menuConversation.pinned ? '取消置顶' : '置顶对话'}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" onPress={() => {
+                  if (!toggleArchived(menuConversation.id)) setExportError('生成中的对话暂时不能归档，请先等待完成或停止生成。');
+                  setMenuConversationId(undefined);
+                }} style={({ pressed }) => [styles.sheetAction, pressed && styles.pressed]}>
+                  <View style={[styles.sheetActionIcon, { backgroundColor: theme.colors.surfaceMuted }]}><Ionicons name="archive-outline" size={19} color={theme.colors.text} /></View>
+                  <Text style={[styles.sheetActionText, { color: theme.colors.text }]}>{menuConversation.archived ? '移出归档' : '归档对话'}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" disabled={exporting} onPress={() => { void exportConversation(menuConversation, 'json'); }} style={({ pressed }) => [styles.sheetAction, pressed && styles.pressed]}>
+                  <View style={[styles.sheetActionIcon, { backgroundColor: theme.colors.surfaceMuted }]}><Ionicons name="download-outline" size={19} color={theme.colors.text} /></View>
+                  <Text style={[styles.sheetActionText, { color: theme.colors.text }]}>导出 JSON 备份</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" disabled={exporting} onPress={() => { void exportConversation(menuConversation, 'md'); }} style={({ pressed }) => [styles.sheetAction, pressed && styles.pressed]}>
+                  <View style={[styles.sheetActionIcon, { backgroundColor: theme.colors.surfaceMuted }]}><Ionicons name="document-text-outline" size={19} color={theme.colors.text} /></View>
+                  <Text style={[styles.sheetActionText, { color: theme.colors.text }]}>导出 Markdown 文本</Text>
+                </Pressable>
+                <Text style={{ color: theme.colors.textTertiary, fontSize: 11, lineHeight: 16 }}>导出为未加密文本，不包含附件文件。请只保存到可信位置。</Text>
                 <Pressable onPress={() => confirmDelete(menuConversation)} style={({ pressed }) => [styles.sheetAction, pressed && styles.pressed]}>
                   <View style={[styles.sheetActionIcon, { backgroundColor: theme.colors.surfaceMuted }]}><Ionicons name="trash-outline" size={19} color={theme.colors.danger} /></View>
                   <Text style={[styles.sheetActionText, { color: theme.colors.danger }]}>删除对话</Text>
                 </Pressable>
               </>
             )}
+            </ScrollView>
             <Pressable onPress={() => setMenuConversationId(undefined)} style={[styles.cancelButton, { backgroundColor: theme.colors.surfaceMuted }]}>
               <Text style={[styles.cancelText, { color: theme.colors.text }]}>取消</Text>
             </Pressable>
@@ -268,6 +307,13 @@ export function HistoryScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, paddingHorizontal: 14 },
+  filters: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  filterChip: { minHeight: 36, flex: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 12 },
+  error: { fontSize: 12, lineHeight: 18, paddingTop: 10 },
+  utilityRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 9 },
+  utilityHint: { fontSize: 11 },
+  savedLink: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, height: 30, borderRadius: 10 },
+  savedLinkText: { fontSize: 11, fontWeight: '700' },
   search: { height: 46, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 13, marginTop: 10 },
   searchInput: { flex: 1, fontSize: 15, marginLeft: 8, height: 44 },
   summaryRow: { minHeight: 68, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingTop: 10, paddingBottom: 6 },
@@ -296,7 +342,7 @@ const styles = StyleSheet.create({
   emptyTitle: { fontSize: 16, fontWeight: '800' },
   emptySubtitle: { fontSize: 12, lineHeight: 18, textAlign: 'center', marginTop: 6 },
   overlay: { flex: 1, justifyContent: 'flex-end' },
-  actionSheet: { borderTopLeftRadius: 26, borderTopRightRadius: 26, paddingHorizontal: 16, paddingTop: 9, paddingBottom: 24 },
+  actionSheet: { maxHeight: '85%', borderTopLeftRadius: 26, borderTopRightRadius: 26, paddingHorizontal: 16, paddingTop: 9, paddingBottom: 24 },
   sheetHandle: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: 14 },
   sheetTitle: { fontSize: 15, fontWeight: '800', textAlign: 'center', marginBottom: 8, paddingHorizontal: 24 },
   sheetAction: { minHeight: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 4 },

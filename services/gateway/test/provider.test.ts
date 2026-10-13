@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { GenerateRequest } from '@nova-chat/protocol';
+import { companionContextSchema, type GenerateRequest } from '@nova-chat/protocol';
 import { loadConfig } from '../src/config.js';
 import { AppDatabase } from '../src/database.js';
 import { ModelProvider } from '../src/provider.js';
@@ -103,6 +103,40 @@ describe('ModelProvider compatibility', () => {
     expect(requestBody(fetchMock, 0).instructions).toContain('gpt-5.6-sol');
   });
 
+  it('injects the versioned Companion Agent prompt without replacing the chat history', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'resp-companion', output_text: '我在这里。' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const modelProvider = await provider();
+    const payload = {
+      ...request(),
+      companion: companionContextSchema.parse({
+        name: '小光',
+        personality: ['安静、温柔'],
+        speakingStyle: ['简洁'],
+        relationshipStage: 'familiar',
+        memories: ['用户喜欢雨天。'],
+        memoryEnabled: true,
+        proactiveMessagesEnabled: false,
+      }),
+    } satisfies GenerateRequest;
+
+    const result = await modelProvider.generate(
+      payload,
+      { id: 'companion-user' },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(result.text).toBe('我在这里。');
+    const body = requestBody(fetchMock, 0);
+    expect(body.input[0]).toMatchObject({ role: 'user', content: 'hello' });
+    expect(body.instructions).toContain('Companion Agent');
+    expect(body.instructions).not.toContain('gpt-5.6-sol');
+    expect(body.instructions).not.toContain('本次请求实际配置的模型');
+    expect(body.instructions).toContain('小光');
+    expect(body.instructions).toContain('用户喜欢雨天');
+    expect(body.instructions).toContain('不得使用内疚、威胁、嫉妒、占有或离开恐惧');
+  });
   it('removes an unsupported code interpreter and retries once without duplicating output', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ error: { code: 'invalid_request_error', message: 'Unsupported tool type: code_interpreter' } }, 400))
@@ -119,11 +153,12 @@ describe('ModelProvider compatibility', () => {
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(requestBody(fetchMock, 0).tools).toEqual([
+    expect(requestBody(fetchMock, 0).tools.filter((tool: any) => tool.type !== 'function')).toEqual([
       { type: 'web_search' },
       { type: 'code_interpreter', container: { type: 'auto' } },
     ]);
-    expect(requestBody(fetchMock, 1).tools).toEqual([{ type: 'web_search' }]);
+    expect(requestBody(fetchMock, 1).tools.filter((tool: any) => tool.type !== 'function')).toEqual([{ type: 'web_search' }]);
+    expect(requestBody(fetchMock, 1).tools.some((tool: any) => tool.name === 'get_weather')).toBe(true);
     expect(deltas).toEqual(['compatible answer']);
     expect(result).toMatchObject({ text: 'compatible answer', model: 'gpt-5.6-sol' });
   });
@@ -136,7 +171,7 @@ describe('ModelProvider compatibility', () => {
     const modelProvider = await provider();
 
     await modelProvider.generate(
-      request({ webSearch: true, codeInterpreter: true }),
+      request({ webSearch: true, codeInterpreter: true, autoTools: false }),
       { id: 'user-3' },
       new AbortController().signal,
       () => undefined,

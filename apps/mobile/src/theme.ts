@@ -43,15 +43,15 @@ export const lightTheme: AppTheme = {
   dark: false,
   fonts: customFonts,
   colors: {
-    background: '#F7F8FA', surface: '#FFFFFF', surfaceElevated: '#FFFFFF', surfaceMuted: '#EFF1F5',
-    text: '#17191D', textSecondary: '#5D626C', textTertiary: '#8C929E', border: '#E3E6EB',
-    primary: '#6157E8', primaryPressed: '#4C43C8', primarySoft: '#ECEAFF', success: '#208A5D',
-    warning: '#A9680B', danger: '#C9414A', userBubble: '#6157E8', assistantBubble: '#FFFFFF',
-    overlay: 'rgba(10,12,18,0.45)', codeBackground: '#F0F1F4',
+    background: '#F6F5F1', surface: '#FFFFFF', surfaceElevated: '#FFFFFF', surfaceMuted: '#ECEDE7',
+    text: '#252B28', textSecondary: '#616B64', textTertiary: '#88918A', border: '#E1E4DD',
+    primary: '#356859', primaryPressed: '#285445', primarySoft: '#E5EEE7', success: '#208A5D',
+    warning: '#A9680B', danger: '#C9414A', userBubble: '#356859', assistantBubble: '#FFFFFF',
+    overlay: 'rgba(10,12,18,0.45)', codeBackground: '#EEF0EA',
   },
   navigation: {
     dark: false,
-    colors: { primary: '#6157E8', background: '#F7F8FA', card: '#FFFFFF', text: '#17191D', border: '#E3E6EB', notification: '#C9414A' },
+    colors: { primary: '#356859', background: '#F6F5F1', card: '#FFFFFF', text: '#252B28', border: '#E1E4DD', notification: '#C9414A' },
     fonts: { regular: { fontFamily: customFonts.regular, fontWeight: '400' }, medium: { fontFamily: customFonts.medium, fontWeight: '500' }, bold: { fontFamily: customFonts.bold, fontWeight: '700' }, heavy: { fontFamily: customFonts.heavy, fontWeight: '800' } },
   },
 };
@@ -60,15 +60,15 @@ export const darkTheme: AppTheme = {
   dark: true,
   fonts: customFonts,
   colors: {
-    background: '#0E0F13', surface: '#17191F', surfaceElevated: '#1D2027', surfaceMuted: '#242730',
-    text: '#F3F4F7', textSecondary: '#B4B8C2', textTertiary: '#7F8591', border: '#2C3039',
-    primary: '#8D85FF', primaryPressed: '#766DF0', primarySoft: '#29264E', success: '#52C995',
-    warning: '#E5A64B', danger: '#FF747D', userBubble: '#6258D8', assistantBubble: '#17191F',
+    background: '#141917', surface: '#1D2521', surfaceElevated: '#26312B', surfaceMuted: '#303B34',
+    text: '#F1F3EE', textSecondary: '#B7C1B8', textTertiary: '#829286', border: '#354238',
+    primary: '#98C1A8', primaryPressed: '#7EA68D', primarySoft: '#283D31', success: '#52C995',
+    warning: '#E5A64B', danger: '#FF747D', userBubble: '#356859', assistantBubble: '#1D2521',
     overlay: 'rgba(0,0,0,0.7)', codeBackground: '#111217',
   },
   navigation: {
     dark: true,
-    colors: { primary: '#8D85FF', background: '#0E0F13', card: '#17191F', text: '#F3F4F7', border: '#2C3039', notification: '#FF747D' },
+    colors: { primary: '#98C1A8', background: '#141917', card: '#1D2521', text: '#F1F3EE', border: '#354238', notification: '#FF747D' },
     fonts: { regular: { fontFamily: customFonts.regular, fontWeight: '400' }, medium: { fontFamily: customFonts.medium, fontWeight: '500' }, bold: { fontFamily: customFonts.bold, fontWeight: '700' }, heavy: { fontFamily: customFonts.heavy, fontWeight: '800' } },
   },
 };

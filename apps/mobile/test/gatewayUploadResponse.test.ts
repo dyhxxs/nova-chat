@@ -29,7 +29,7 @@ describe('gateway upload response parsing', () => {
     expect(() => parseGatewayUploadResponse(502, '<html>Bad gateway</html>')).toThrowError(
       expect.objectContaining<Partial<GatewayUploadResponseError>>({
         code: 'http_502',
-        message: '服务器返回了 502。',
+        message: expect.stringContaining('网关服务暂时不可用（502）'),
         retryable: true,
         status: 502,
       }),

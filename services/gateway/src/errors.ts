@@ -1,3 +1,4 @@
+import { ProviderSettingsUpdateError } from './providerSettings.js';
 import { ProviderError } from './provider.js';
 
 export type PublicError = { code: string; message: string; retryable: boolean; statusCode: number };
@@ -5,6 +6,9 @@ export type PublicError = { code: string; message: string; retryable: boolean; s
 export function toPublicError(error: unknown): PublicError {
   if (error instanceof DOMException && error.name === 'AbortError') {
     return { code: 'cancelled', message: '请求已取消。', retryable: false, statusCode: 499 };
+  }
+  if (error instanceof ProviderSettingsUpdateError) {
+    return { code: error.code, message: error.message, retryable: false, statusCode: 400 };
   }
   if (error instanceof ProviderError) {
     return { code: error.code, message: error.message, retryable: error.retryable, statusCode: error.status };

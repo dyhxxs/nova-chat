@@ -8,8 +8,15 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["node"],
-    "noEmit": true
+    "types": [
+      "node"
+    ],
+    "noEmit": true,
+    "allowJs": true
   },
-  "include": ["src", "test", "../../packages/protocol/src"]
+  "include": [
+    "src",
+    "test",
+    "../../packages/protocol/src"
+  ]
 }

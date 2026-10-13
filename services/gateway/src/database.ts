@@ -1,8 +1,12 @@
+import { ProviderSettingsUpdateError, resolveProviderSettings, type ProviderSettingsInput } from './providerSettings.js';
+import { KnowledgeStore } from './knowledge.js';
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from './config.js';
+import { CYBER_COMPANION_AGENT_VERSION, defaultCompanionContext, effectiveCompanionPersona } from './companionAgent.js';
+import { companionContextSchema, type CompanionContext, type CompanionProfile, type CompanionProfileInput } from '@nova-chat/protocol';
 
 export type UserRole = 'admin' | 'user';
 export type UserRecord = {
@@ -17,6 +21,7 @@ export type UserRecord = {
   avatarFileId?: string;
 };
 export type SessionPrincipal = UserRecord & { sessionId: string };
+export type UserSession = { id: string; deviceId: string; createdAt: number; expiresAt: number; current: boolean };
 export type ProviderSettings = {
   apiBaseUrl: string;
   apiKey: string;
@@ -26,7 +31,7 @@ export type ProviderSettings = {
   allowedModels: string[];
   updatedAt?: number;
 };
-export type PublicProviderSettings = Omit<ProviderSettings, 'apiKey'> & { apiKeySet: boolean; apiKeyPreview: string };
+export type PublicProviderSettings = Omit<ProviderSettings, 'apiBaseUrl' | 'apiKey'> & { apiBaseUrl: ''; apiBaseUrlSet: boolean; apiKeySet: boolean };
 export type StoredFile = {
   id: string;
   userId: string;
@@ -36,6 +41,24 @@ export type StoredFile = {
   kind: 'image' | 'document';
   storagePath: string;
   createdAt: number;
+};
+
+type CompanionRow = {
+  id: string;
+  user_id: string;
+  template_id: string;
+  template_version: number;
+  name: string;
+  personality_json: string;
+  speaking_style_json: string;
+  relationship_stage: CompanionContext['relationshipStage'];
+  user_name: string | null;
+  memories_json: string;
+  mood: CompanionContext['mood'] | null;
+  memory_enabled: number;
+  proactive_messages_enabled: number;
+  created_at: number;
+  updated_at: number;
 };
 
 type UserRow = {
@@ -78,6 +101,7 @@ function safeEqualEncoded(left: string, right: Buffer): boolean {
 
 export class AppDatabase {
   readonly uploadsDir: string;
+  readonly knowledge: KnowledgeStore;
   private readonly db: DatabaseSync;
   private readonly encryptionKey: Buffer;
 
@@ -89,6 +113,7 @@ export class AppDatabase {
     this.encryptionKey = createHash('sha256').update(config.serverMasterKey || 'nova-chat-development-key').digest();
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     this.migrate();
+    this.knowledge = new KnowledgeStore(this.db);
     if (config.adminAutoCreate && config.nodeEnv !== 'test') this.ensureDefaultAdmin();
     this.cleanupExpiredSessions();
   }
@@ -140,6 +165,36 @@ export class AppDatabase {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS files_user_idx ON files(user_id, created_at);
+      CREATE TABLE IF NOT EXISTS companion_profiles (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        template_id TEXT NOT NULL,
+        template_version INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        personality_json TEXT NOT NULL,
+        speaking_style_json TEXT NOT NULL,
+        relationship_stage TEXT NOT NULL CHECK(relationship_stage IN ('new','familiar','close','custom')),
+        user_name TEXT,
+        memories_json TEXT NOT NULL,
+        mood TEXT CHECK(mood IS NULL OR mood IN ('calm','warm','playful','serious','sad','anxious','tired','excited')),
+        memory_enabled INTEGER NOT NULL DEFAULT 0,
+        proactive_messages_enabled INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS companion_profiles_user_idx ON companion_profiles(user_id, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS companion_appearance (
+        companion_id TEXT PRIMARY KEY REFERENCES companion_profiles(id) ON DELETE CASCADE,
+        appearance TEXT NOT NULL DEFAULT '', avatar_file_id TEXT, revision TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS companion_provider_settings (
+        purpose TEXT PRIMARY KEY CHECK(purpose IN ('chat','image')), settings_encrypted TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS generation_jobs (
+        request_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS generation_jobs_expiry_idx ON generation_jobs(updated_at);
       CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         actor_user_id TEXT,
@@ -184,6 +239,9 @@ export class AppDatabase {
       VALUES (?,?,?,?,?,?,0,?,?)`).run(
       userId, normalizeEmail(input.email), input.displayName.trim(), digest, salt, input.role ?? 'user', now, now,
     );
+    // New accounts get one usable companion immediately. Existing accounts are
+    // lazily backfilled by listCompanions so migrations remain non-destructive.
+    this.createCompanion(userId);
     return this.getUserById(userId)!;
   }
 
@@ -214,6 +272,51 @@ export class AppDatabase {
 
   revokeSession(token: string | undefined) { if (token) this.db.prepare('DELETE FROM sessions WHERE token_hash=?').run(tokenHash(token)); }
   revokeUserSessions(userId: string) { this.db.prepare('DELETE FROM sessions WHERE user_id=?').run(userId); }
+
+  listSessions(userId: string, currentSessionId: string): UserSession[] {
+    const rows = this.db.prepare(`SELECT id,device_id,created_at,expires_at FROM sessions
+      WHERE user_id=? AND expires_at>? ORDER BY (id=?) DESC,created_at DESC,id DESC`).all(userId, Date.now(), currentSessionId) as {
+        id: string; device_id: string; created_at: number; expires_at: number;
+      }[];
+    return rows.map((row) => ({ id: row.id, deviceId: row.device_id, createdAt: row.created_at, expiresAt: row.expires_at, current: row.id === currentSessionId }));
+  }
+
+  hasActiveSession(sessionId: string, userId: string): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id
+      WHERE s.id=? AND s.user_id=? AND s.expires_at>? AND u.disabled=0`).get(sessionId, userId, Date.now()));
+  }
+
+  revokeOwnedSession(userId: string, sessionId: string): boolean {
+    const result = this.db.prepare('DELETE FROM sessions WHERE user_id=? AND id=?').run(userId, sessionId);
+    if (Number(result.changes) > 0) this.audit(userId, 'auth.session.revoke', sessionId);
+    return Number(result.changes) > 0;
+  }
+
+  revokeOtherSessions(userId: string, currentSessionId: string): number {
+    const result = this.db.prepare('DELETE FROM sessions WHERE user_id=? AND id<>?').run(userId, currentSessionId);
+    this.audit(userId, 'auth.sessions.revoke_others', userId);
+    return Number(result.changes);
+  }
+
+  changePassword(userId: string, currentPassword: string, newPassword: string): boolean {
+    const row = this.db.prepare('SELECT password_hash,password_salt FROM users WHERE id=? AND disabled=0')
+      .get(userId) as { password_hash: string; password_salt: string } | undefined;
+    if (!row || !safeEqualEncoded(row.password_hash, passwordDigest(currentPassword, row.password_salt))) return false;
+    const salt = randomBytes(16).toString('base64url');
+    const digest = passwordDigest(newPassword, salt).toString('base64url');
+    // Password replacement and session invalidation must commit together.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('UPDATE users SET password_hash=?,password_salt=?,updated_at=? WHERE id=?').run(digest, salt, Date.now(), userId);
+      this.revokeUserSessions(userId);
+      this.audit(userId, 'auth.password.change', userId);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+    return true;
+  }
 
   getUserById(userId: string): UserRecord | undefined {
     const row = this.db.prepare('SELECT id,email,display_name,role,disabled,created_at,updated_at,last_login_at,avatar_file_id FROM users WHERE id=?')
@@ -308,20 +411,20 @@ export class AppDatabase {
   getPublicProviderSettings(): PublicProviderSettings {
     const settings = this.getProviderSettings();
     return {
-      apiBaseUrl: settings.apiBaseUrl,
+      // Empty compatibility sentinel lets older administrator forms save without exposing the URL.
+      apiBaseUrl: '',
+      apiBaseUrlSet: Boolean(settings.apiBaseUrl),
       apiMode: settings.apiMode,
       authMode: settings.authMode,
       defaultModel: settings.defaultModel,
       allowedModels: settings.allowedModels,
       updatedAt: settings.updatedAt,
       apiKeySet: Boolean(settings.apiKey),
-      apiKeyPreview: settings.apiKey ? `••••${settings.apiKey.slice(-4)}` : '',
     };
   }
 
-  updateProviderSettings(input: Omit<ProviderSettings, 'apiKey' | 'updatedAt'> & { apiKey?: string }, actorUserId: string): PublicProviderSettings {
-    const current = this.getProviderSettings();
-    const apiKey = input.apiKey === undefined ? current.apiKey : input.apiKey.trim();
+  updateProviderSettings(input: ProviderSettingsInput, actorUserId: string): PublicProviderSettings {
+    const settings = resolveProviderSettings(this.getProviderSettings(), input);
     const now = Date.now();
     this.db.prepare(`INSERT INTO provider_settings
       (id,api_base_url,api_key_encrypted,api_mode,auth_mode,default_model,allowed_models,updated_at,updated_by)
@@ -329,11 +432,205 @@ export class AppDatabase {
       ON CONFLICT(id) DO UPDATE SET api_base_url=excluded.api_base_url,api_key_encrypted=excluded.api_key_encrypted,
       api_mode=excluded.api_mode,auth_mode=excluded.auth_mode,default_model=excluded.default_model,
       allowed_models=excluded.allowed_models,updated_at=excluded.updated_at,updated_by=excluded.updated_by`).run(
-      input.apiBaseUrl.replace(/\/$/, ''), this.encrypt(apiKey), input.apiMode, input.authMode,
-      input.defaultModel.trim(), input.allowedModels.join(','), now, actorUserId,
+      settings.apiBaseUrl, this.encrypt(settings.apiKey), settings.apiMode, settings.authMode,
+      settings.defaultModel, settings.allowedModels.join(','), now, actorUserId,
     );
     this.audit(actorUserId, 'provider.update', 'provider');
     return this.getPublicProviderSettings();
+  }
+
+  getCompanionProviderSettings(purpose: 'chat' | 'image'): ProviderSettings {
+    const row = this.db.prepare('SELECT settings_encrypted, updated_at FROM companion_provider_settings WHERE purpose=?').get(purpose) as { settings_encrypted: string; updated_at: number } | undefined;
+    return row ? { ...JSON.parse(this.decrypt(row.settings_encrypted)), updatedAt: row.updated_at } : {
+      apiBaseUrl: '', apiKey: '', apiMode: 'chat-completions', authMode: 'bearer', defaultModel: '', allowedModels: [],
+    };
+  }
+
+  publicCompanionProviderSettings(purpose: 'chat' | 'image'): PublicProviderSettings {
+    const value = this.getCompanionProviderSettings(purpose);
+    return { apiBaseUrl: '', apiBaseUrlSet: Boolean(value.apiBaseUrl), apiKeySet: Boolean(value.apiKey), apiMode: value.apiMode,
+      authMode: value.authMode, defaultModel: value.defaultModel, allowedModels: value.allowedModels, updatedAt: value.updatedAt };
+  }
+
+  setCompanionProviderSettings(purpose: 'chat' | 'image', input: ProviderSettingsInput, actor: string): PublicProviderSettings {
+    const value = resolveProviderSettings(this.getCompanionProviderSettings(purpose), input);
+    if (!value.apiBaseUrl || (value.authMode !== 'none' && !value.apiKey)) throw new ProviderSettingsUpdateError('请填写陪伴服务地址和密钥。');
+    this.db.prepare('INSERT INTO companion_provider_settings(purpose,settings_encrypted,updated_at) VALUES(?,?,?) ON CONFLICT(purpose) DO UPDATE SET settings_encrypted=excluded.settings_encrypted,updated_at=excluded.updated_at')
+      .run(purpose, this.encrypt(JSON.stringify(value)), Date.now());
+    this.audit(actor, 'companion.provider.update', purpose);
+    return this.publicCompanionProviderSettings(purpose);
+  }
+
+  getCompanionAppearance(companionId: string): { appearance: string; avatarFileId: string | null } {
+    this.db.prepare('INSERT OR IGNORE INTO companion_appearance(companion_id,appearance,avatar_file_id,revision) VALUES(?,?,?,?)').run(companionId, '', null, randomUUID());
+    const row = this.db.prepare('SELECT appearance,avatar_file_id FROM companion_appearance WHERE companion_id=?').get(companionId) as { appearance: string; avatar_file_id: string | null } | undefined;
+    return { appearance: row?.appearance ?? '', avatarFileId: row?.avatar_file_id ?? null };
+  }
+
+  companionAppearanceRevision(companionId: string): string {
+    const row = this.db.prepare('SELECT revision FROM companion_appearance WHERE companion_id=?').get(companionId) as { revision: string } | undefined;
+    return row?.revision ?? '';
+  }
+
+  private setCompanionAppearance(companionId: string, appearance: string, avatarFileId: string | null) {
+    this.db.prepare('INSERT INTO companion_appearance(companion_id,appearance,avatar_file_id,revision) VALUES(?,?,?,?) ON CONFLICT(companion_id) DO UPDATE SET appearance=excluded.appearance,avatar_file_id=excluded.avatar_file_id,revision=excluded.revision')
+      .run(companionId, appearance, avatarFileId, randomUUID());
+  }
+
+  saveGeneratedCompanionFace(userId: string, companionId: string, revision: string, fileId: string): boolean {
+    const file = this.getFile(fileId);
+    if (!file || file.userId !== userId || file.kind !== 'image' || !this.getCompanion(userId, companionId)) return false;
+    const result = this.db.prepare('UPDATE companion_appearance SET avatar_file_id=?,revision=? WHERE companion_id=? AND revision=? AND avatar_file_id IS NULL')
+      .run(fileId, randomUUID(), companionId, revision);
+    return Number(result.changes) === 1;
+  }
+
+  saveGenerationSnapshot(userId: string, conversationId: string, requestId: string, snapshot: object) {
+    this.db.prepare('INSERT INTO generation_jobs(request_id,user_id,conversation_id,snapshot_json,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET snapshot_json=excluded.snapshot_json,updated_at=excluded.updated_at')
+      .run(requestId, userId, conversationId, JSON.stringify(snapshot), Date.now());
+  }
+
+  getGenerationSnapshot(userId: string, conversationId: string, requestId: string): Record<string, any> | undefined {
+    const row = this.db.prepare('SELECT snapshot_json FROM generation_jobs WHERE request_id=? AND user_id=? AND conversation_id=?').get(requestId, userId, conversationId) as { snapshot_json: string } | undefined;
+    if (!row) return undefined;
+    const snapshot = JSON.parse(row.snapshot_json);
+    if (snapshot.status === 'queued' || snapshot.status === 'running') {
+      snapshot.status = 'failed'; snapshot.updatedAt = Date.now();
+      snapshot.error = { code: 'gateway_restarted', message: '连接中断了，已保留收到的内容，请点按重试继续。', retryable: true };
+      this.saveGenerationSnapshot(userId, conversationId, requestId, snapshot);
+    }
+    return snapshot;
+  }
+
+  hasGenerationRequest(requestId: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM generation_jobs WHERE request_id=?').get(requestId));
+  }
+
+  cleanupGenerationSnapshots() {
+    this.db.prepare('DELETE FROM generation_jobs WHERE updated_at<?').run(Date.now() - 7 * 24 * 60 * 60_000);
+  }
+
+  private companionFromRow(row: CompanionRow): CompanionProfile {
+    const parseList = (value: string): string[] => {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+      } catch {
+        return [];
+      }
+    };
+    return {
+      id: row.id,
+      templateId: row.template_id,
+      name: row.name,
+      ...effectiveCompanionPersona(parseList(row.personality_json), parseList(row.speaking_style_json)),
+      relationshipStage: row.relationship_stage,
+      ...(row.user_name ? { userName: row.user_name } : {}),
+      memories: parseList(row.memories_json),
+      ...(row.mood ? { mood: row.mood } : {}),
+      memoryEnabled: row.memory_enabled === 1,
+      proactiveMessagesEnabled: row.proactive_messages_enabled === 1,
+      ...this.getCompanionAppearance(row.id),
+      templateVersion: row.template_version,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private companionContext(input?: CompanionProfileInput): CompanionContext {
+    return companionContextSchema.parse({ ...defaultCompanionContext(), ...(input ?? {}) });
+  }
+
+  createCompanion(userId: string, input: CompanionProfileInput = {}): CompanionProfile {
+    const context = this.companionContext(input);
+    const companionId = randomUUID();
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO companion_profiles
+      (id,user_id,template_id,template_version,name,personality_json,speaking_style_json,relationship_stage,user_name,memories_json,mood,memory_enabled,proactive_messages_enabled,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      companionId,
+      userId,
+      context.templateId,
+      CYBER_COMPANION_AGENT_VERSION,
+      context.name,
+      JSON.stringify(context.personality),
+      JSON.stringify(context.speakingStyle),
+      context.relationshipStage,
+      context.userName ?? null,
+      JSON.stringify(context.memories),
+      context.mood ?? null,
+      context.memoryEnabled ? 1 : 0,
+      context.proactiveMessagesEnabled ? 1 : 0,
+      now,
+      now,
+    );
+    this.setCompanionAppearance(companionId, context.appearance, context.avatarFileId);
+    this.audit(userId, 'companion.create', companionId);
+    return this.getCompanion(userId, companionId)!;
+  }
+
+  ensureDefaultCompanion(userId: string): CompanionProfile {
+    const existing = this.db.prepare('SELECT id FROM companion_profiles WHERE user_id=? ORDER BY created_at ASC LIMIT 1').get(userId) as { id: string } | undefined;
+    if (existing) return this.getCompanion(userId, existing.id)!;
+    return this.createCompanion(userId);
+  }
+
+  listCompanions(userId: string): CompanionProfile[] {
+    this.ensureDefaultCompanion(userId);
+    const rows = this.db.prepare(`SELECT id,user_id,template_id,template_version,name,personality_json,speaking_style_json,
+      relationship_stage,user_name,memories_json,mood,memory_enabled,proactive_messages_enabled,created_at,updated_at
+      FROM companion_profiles WHERE user_id=? ORDER BY updated_at DESC, created_at ASC`).all(userId) as CompanionRow[];
+    return rows.map((row) => this.companionFromRow(row));
+  }
+
+  getCompanion(userId: string, companionId: string): CompanionProfile | undefined {
+    const row = this.db.prepare(`SELECT id,user_id,template_id,template_version,name,personality_json,speaking_style_json,
+      relationship_stage,user_name,memories_json,mood,memory_enabled,proactive_messages_enabled,created_at,updated_at
+      FROM companion_profiles WHERE id=? AND user_id=?`).get(companionId, userId) as CompanionRow | undefined;
+    return row ? this.companionFromRow(row) : undefined;
+  }
+
+  updateCompanion(userId: string, companionId: string, patch: CompanionProfileInput): CompanionProfile | undefined {
+    const current = this.getCompanion(userId, companionId);
+    if (!current) return undefined;
+    const currentContext = companionContextSchema.strip().parse(current);
+    // Zod's partial schema may retain optional keys with an undefined value.
+    // Do not let those keys erase persisted profile fields during a PATCH.
+    const definedPatch = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as CompanionProfileInput;
+    const context = this.companionContext({ ...currentContext, ...definedPatch });
+    if (patch.appearance !== undefined && patch.appearance !== current.appearance && patch.avatarFileId === undefined) context.avatarFileId = null;
+    const now = Date.now();
+    this.db.prepare(`UPDATE companion_profiles SET template_id=?,template_version=?,name=?,personality_json=COALESCE(?,personality_json),speaking_style_json=COALESCE(?,speaking_style_json),
+      relationship_stage=?,user_name=?,memories_json=?,mood=?,memory_enabled=?,proactive_messages_enabled=?,updated_at=?
+      WHERE id=? AND user_id=?`).run(
+      context.templateId,
+      CYBER_COMPANION_AGENT_VERSION,
+      context.name,
+      // Preserve saved persona text when only another field is patched.
+      patch.personality === undefined ? null : JSON.stringify(context.personality),
+      patch.speakingStyle === undefined ? null : JSON.stringify(context.speakingStyle),
+      context.relationshipStage,
+      context.userName ?? null,
+      JSON.stringify(context.memories),
+      context.mood ?? null,
+      context.memoryEnabled ? 1 : 0,
+      context.proactiveMessagesEnabled ? 1 : 0,
+      now,
+      companionId,
+      userId,
+    );
+    if (patch.appearance !== undefined || patch.avatarFileId !== undefined) this.setCompanionAppearance(companionId, context.appearance, context.avatarFileId);
+    this.audit(userId, 'companion.update', companionId);
+    return this.getCompanion(userId, companionId);
+  }
+
+  deleteCompanion(userId: string, companionId: string): boolean {
+    const result = this.db.prepare('DELETE FROM companion_profiles WHERE id=? AND user_id=?').run(companionId, userId);
+    if (Number(result.changes) > 0) {
+      this.audit(userId, 'companion.delete', companionId);
+      return true;
+    }
+    return false;
   }
 
   createFile(input: Omit<StoredFile, 'createdAt'>): StoredFile {

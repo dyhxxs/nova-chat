@@ -1,8 +1,8 @@
 {
   "name": "nova-chat",
-  "version": "1.1.13",
+  "version": "1.1.27",
   "private": true,
-  "description": "Self-hosted multi-user Android/iOS AI chat client with a secure OpenAI-compatible model gateway.",
+  "description": "Characterful AI companions and a capable everyday assistant, with customizable personas, character photos, multi-model chat and a self-hosted gateway.",
   "repository": {
     "type": "git",
     "url": "https://github.com/dyhxxs/nova-chat.git"
@@ -12,6 +12,8 @@
     "url": "https://github.com/dyhxxs/nova-chat/issues"
   },
   "keywords": [
+    "ai-companion",
+    "character-chat",
     "ai-chat",
     "android",
     "ios",
@@ -20,7 +22,10 @@
     "self-hosted",
     "openai-compatible",
     "gateway",
-    "multi-user"
+    "multi-user",
+    "typescript",
+    "llm",
+    "knowledge-base"
   ],
   "workspaces": [
     "apps/*",
@@ -37,20 +42,27 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
-    "verify": "npm run typecheck && npm run test && npm run lint",
+    "verify": "npm run typecheck && npm run test && npm run test:scripts && npm run lint",
     "postinstall": "npm run build -w @nova-chat/protocol",
     "assets": "python scripts/generate_assets.py",
     "tunnel:gateway": "powershell -ExecutionPolicy Bypass -File scripts/start_gateway_tunnel.ps1",
     "share:builds": "powershell -ExecutionPolicy Bypass -File scripts/start_download_tunnel.ps1",
-    "share:stop": "powershell -ExecutionPolicy Bypass -File scripts/stop_download_tunnel.ps1"
+    "share:stop": "powershell -ExecutionPolicy Bypass -File scripts/stop_download_tunnel.ps1",
+    "test:scripts": "node --test scripts/test/*.test.mjs",
+    "gateway:check": "node scripts/check_gateway.mjs",
+    "gateway:check-chat": "node scripts/check_gateway_chat.mjs",
+    "benchmark:mobile": "node --import tsx scripts/benchmark_mobile.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "overrides": {
-    "react-native-svg": "15.15.4"
+    "react-native-svg": "15.15.4",
+    "react-native": "0.86.3",
+    "react": "19.2.3",
+    "uuid": "^11.1.1"
   }
 }

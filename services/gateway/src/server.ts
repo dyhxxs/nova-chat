@@ -1,3 +1,4 @@
+import { registerKnowledgeRoutes } from './knowledgeRoutes.js';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { unlink, writeFile } from 'node:fs/promises';
@@ -10,10 +11,15 @@ import rateLimit from '@fastify/rate-limit';
 import WebSocket, { WebSocketServer, type RawData } from 'ws';
 import { z } from 'zod';
 import {
+  COMPANION_PROFILE_VERSION_HEADER,
   clientSocketMessageSchema,
   restGenerateSchema,
   trimChatMessages,
+  companionProfileInputSchema,
+  companionContextSchema,
+  type CompanionProfile,
   type GenerateRequest,
+  type ToolActivity,
   type ServerSocketMessage,
 } from '@nova-chat/protocol';
 import { bearerToken, tokenMatches } from './auth.js';
@@ -21,8 +27,11 @@ import type { AppConfig } from './config.js';
 import { AppDatabase, type SessionPrincipal, type UserRecord } from './database.js';
 import { toPublicError } from './errors.js';
 import { ConcurrencyGate, SlidingWindowLimiter } from './limits.js';
+import { resolveProviderSettings } from './providerSettings.js';
 import { ModelProvider, type GenerationResult } from './provider.js';
+import { toolCatalog } from './tools/index.js';
 import { classifyAttachment, isSupportedMimeType, mimeTypeForName, normalizeMimeType } from './attachments.js';
+import { isSupportedCompanionTemplate } from './companionAgent.js';
 
 const credentialsSchema = z.object({
   email: z.string().trim().email().max(254),
@@ -30,6 +39,10 @@ const credentialsSchema = z.object({
   displayName: z.string().trim().min(1).max(80),
   deviceId: z.string().min(8).max(128),
 });
+const registrationSchema = credentialsSchema.extend({
+  displayName: z.string().trim().max(80).optional().transform((value) => value || '新用户'),
+});
+const passwordChangeSchema = z.object({ currentPassword: z.string().min(8).max(200), newPassword: z.string().min(8).max(200) });
 const loginSchema = credentialsSchema.pick({ email: true, password: true, deviceId: true });
 const bootstrapSchema = credentialsSchema.extend({ bootstrapToken: z.string().max(4096).default('') });
 const profilePatchSchema = z.object({
@@ -44,7 +57,10 @@ const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 const jobScopeSchema = z.object({ conversationId: z.string().uuid() });
 
 const providerSchema = z.object({
-  apiBaseUrl: z.string().url().max(2048),
+  apiBaseUrl: z.union([z.literal(''), z.string().trim().url().max(2048).refine((value) => {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
+  })]).optional(),
   apiKey: z.string().max(4096).optional(),
   apiMode: z.enum(['responses', 'chat-completions']),
   authMode: z.enum(['bearer', 'api-key', 'none']),
@@ -64,6 +80,7 @@ type GenerationJob = {
   controller: AbortController;
   status: GenerationJobStatus;
   text: string;
+  tools?: ToolActivity[];
   result?: GenerationResult;
   error?: ReturnType<typeof toPublicError>;
   socket?: WebSocket;
@@ -119,6 +136,31 @@ function prepareGeneration(payload: GenerateRequest, config: AppConfig): Generat
   return messages.length ? { ...payload, messages } : payload;
 }
 
+type CompanionResolution =
+  | { payload: GenerateRequest }
+  | { error: { code: string; message: string } };
+
+function companionContextFromProfile(profile: CompanionProfile) {
+  return companionContextSchema.strip().parse(profile);
+}
+
+function resolveCompanionPayload(database: AppDatabase, principal: Principal, payload: GenerateRequest): CompanionResolution {
+  if (!payload.companionId) return { payload };
+  if (principal.sessionId === 'legacy') {
+    return { error: { code: 'account_required', message: '持久化陪伴角色需要登录账户。' } };
+  }
+  const profile = database.getCompanion(principal.id, payload.companionId);
+  if (!profile) return { error: { code: 'companion_not_found', message: '陪伴角色不存在或不属于当前账户。' } };
+  return { payload: { ...payload, companion: companionContextFromProfile(profile), options: { ...payload.options, instructions: '', knowledgeBase: false, autoTools: true, webSearch: false, codeInterpreter: false, reasoningEffort: 'none', verbosity: 'low' } } };
+}
+
+/** Old apps strictly validate v1 profiles; new fields require an explicit opt-in. */
+function publicCompanionProfile(request: FastifyRequest, profile: CompanionProfile) {
+  if (request.headers[COMPANION_PROFILE_VERSION_HEADER] === '2') return profile;
+  const legacy = { ...profile };
+  return Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== 'appearance' && key !== 'avatarFileId'));
+}
+
 function safeFileName(value: string): string {
   const base = path.basename(value || 'attachment');
   return Array.from(base)
@@ -165,7 +207,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
       level: config.logLevel,
-      redact: ['req.headers.authorization', 'req.body.password', 'req.body.bootstrapToken', 'req.body.apiKey', 'body.messages', 'body.options.instructions'],
+      redact: ['req.headers.authorization', 'req.body.password', 'req.body.currentPassword', 'req.body.newPassword', 'req.body.bootstrapToken', 'req.body.apiKey', 'req.body.apiBaseUrl', 'body.apiKey', 'body.apiBaseUrl', 'body.messages', 'body.options.instructions'],
     },
     // Long-running conversations are trimmed below, but the request itself must
     // be large enough to reach that code path.
@@ -176,6 +218,8 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   const provider = new ModelProvider(config, database, { warn: (bindings, message) => app.log.warn(bindings, message) });
   const limiter = new SlidingWindowLimiter(config.requestsPerMinute);
   const concurrency = new ConcurrencyGate(config.maxConcurrentPerDevice);
+  const passwordLimiter = new SlidingWindowLimiter(5, 15 * 60_000);
+  const socketValidators = new Map<WebSocket, () => boolean>();
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {
@@ -204,11 +248,28 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     return { ok: true, service: 'nova-chat-gateway', apiMode: settings.apiMode, defaultModel: settings.defaultModel };
   });
 
-  app.get('/v1/setup/status', async () => ({
-    needsBootstrap: !database.hasAdmin(),
-    bootstrapTokenRequired: Boolean(config.adminBootstrapToken),
-    registrationEnabled: config.registrationEnabled,
-  }));
+  app.get('/v1/tools', async (request, reply) => {
+    if (!requireUser(request, reply)) return;
+    return {
+      tools: toolCatalog(config),
+      defaultTimezone: config.defaultTimezone,
+      searchProvider: config.braveSearchApiKey ? 'brave' : 'bing-rss-fallback',
+      note: '这是配置能力列表，不代表外部服务实时可用。内置工具按需执行；系统时钟始终提供。',
+    };
+  });
+
+  app.get('/v1/setup/status', async () => {
+    const settings = database.getProviderSettings();
+    return {
+      needsBootstrap: !database.hasAdmin(),
+      bootstrapTokenRequired: Boolean(config.adminBootstrapToken),
+      registrationEnabled: config.registrationEnabled,
+      // Configuration readiness only; never expose credentials or claim upstream availability.
+      providerConfigured: Boolean(settings.apiBaseUrl && settings.defaultModel
+        && settings.allowedModels.includes(settings.defaultModel)
+        && (settings.authMode === 'none' || settings.apiKey)),
+    };
+  });
 
   app.post('/v1/auth/bootstrap', async (request, reply) => {
     if (database.hasAdmin()) return reply.code(409).send({ error: { code: 'already_configured', message: '管理员已经创建。', retryable: false } });
@@ -230,7 +291,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   app.post('/v1/auth/register', async (request, reply) => {
     if (!database.hasAdmin()) return reply.code(409).send({ error: { code: 'setup_required', message: '请先创建管理员账户。', retryable: false } });
     if (!config.registrationEnabled) return reply.code(403).send({ error: { code: 'registration_disabled', message: '管理员已关闭注册。', retryable: false } });
-    const parsed = credentialsSchema.safeParse(request.body);
+    const parsed = registrationSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '请填写有效邮箱、名称和至少 8 位密码。', retryable: false } });
     try {
       const user = database.createUser(parsed.data);
@@ -257,6 +318,54 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     const principal = principalForToken(database, config, token);
     if (!principal) return unauthorized(reply);
     if (principal.sessionId !== 'legacy') database.revokeSession(token);
+    invalidateRevokedSessions();
+    return { ok: true };
+  });
+
+  app.get('/v1/auth/sessions', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return forbidden(reply);
+    return { sessions: database.listSessions(principal.id, principal.sessionId) };
+  });
+
+  app.delete('/v1/auth/sessions/:sessionId', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return forbidden(reply);
+    const { sessionId } = request.params as { sessionId: string };
+    if (!database.revokeOwnedSession(principal.id, sessionId)) {
+      return reply.code(404).send({ error: { code: 'session_not_found', message: '登录会话不存在或已退出。', retryable: false } });
+    }
+    invalidateRevokedSessions();
+    return { ok: true, currentSessionRevoked: sessionId === principal.sessionId };
+  });
+
+  app.post('/v1/auth/sessions/revoke-others', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return forbidden(reply);
+    const revoked = database.revokeOtherSessions(principal.id, principal.sessionId);
+    invalidateRevokedSessions();
+    return { ok: true, revoked };
+  });
+
+  app.post('/v1/auth/password', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return forbidden(reply);
+    const parsed = passwordChangeSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '密码长度需要为 8–200 个字符。', retryable: false } });
+    const limit = passwordLimiter.consume(principal.id);
+    if (!limit.allowed) return reply.header('retry-after', String(Math.ceil(limit.retryAfterMs / 1_000))).code(429)
+      .send({ error: { code: 'rate_limited', message: '修改密码尝试过于频繁，请 15 分钟后重试。', retryable: true } });
+    if (parsed.data.currentPassword.normalize('NFKC') === parsed.data.newPassword.normalize('NFKC')) {
+      return reply.code(400).send({ error: { code: 'password_unchanged', message: '新密码不能与当前密码相同。', retryable: false } });
+    }
+    if (!database.changePassword(principal.id, parsed.data.currentPassword, parsed.data.newPassword)) {
+      return reply.code(400).send({ error: { code: 'invalid_current_password', message: '当前密码不正确。', retryable: false } });
+    }
+    invalidateRevokedSessions();
     return { ok: true };
   });
 
@@ -354,6 +463,67 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     return { user: publicUser(result.user) };
   });
 
+  app.get('/v1/companions', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '陪伴角色需要登录账户。', retryable: false } });
+    return { companions: database.listCompanions(principal.id).map((profile) => publicCompanionProfile(request, profile)) };
+  });
+
+  app.post('/v1/companions', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '陪伴角色需要登录账户。', retryable: false } });
+    const parsed = companionProfileInputSchema.safeParse(request.body ?? {});
+    if (!parsed.success || !isSupportedCompanionTemplate(parsed.data.templateId)) {
+      return reply.code(400).send({ error: { code: 'invalid_companion', message: '陪伴角色配置无效或暂不支持该模板。', retryable: false } });
+    }
+    if (parsed.data.avatarFileId) {
+      const face = database.getFile(parsed.data.avatarFileId);
+      if (!face || face.userId !== principal.id || face.kind !== 'image') return reply.code(400).send({ error: { code: 'invalid_companion_face', message: '请选择当前账户上传的照片。', retryable: false } });
+    }
+    return reply.code(201).send({ companion: publicCompanionProfile(request, database.createCompanion(principal.id, parsed.data)) });
+  });
+
+  app.get('/v1/companions/:id', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '陪伴角色需要登录账户。', retryable: false } });
+    const id = (request.params as { id?: string }).id;
+    const companion = id ? database.getCompanion(principal.id, id) : undefined;
+    if (!companion) return reply.code(404).send({ error: { code: 'companion_not_found', message: '陪伴角色不存在。', retryable: false } });
+    return { companion: publicCompanionProfile(request, companion) };
+  });
+
+  app.patch('/v1/companions/:id', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '陪伴角色需要登录账户。', retryable: false } });
+    const parsed = companionProfileInputSchema.safeParse(request.body ?? {});
+    const id = (request.params as { id?: string }).id;
+    if (!id || !parsed.success || !isSupportedCompanionTemplate(parsed.data.templateId)) {
+      return reply.code(400).send({ error: { code: 'invalid_companion', message: '陪伴角色配置无效或暂不支持该模板。', retryable: false } });
+    }
+    if (parsed.data.avatarFileId) {
+      const face = database.getFile(parsed.data.avatarFileId);
+      if (!face || face.userId !== principal.id || face.kind !== 'image') return reply.code(400).send({ error: { code: 'invalid_companion_face', message: '请选择当前账户上传的照片。', retryable: false } });
+    }
+    const companion = database.updateCompanion(principal.id, id, parsed.data);
+    if (!companion) return reply.code(404).send({ error: { code: 'companion_not_found', message: '陪伴角色不存在。', retryable: false } });
+    return { companion: publicCompanionProfile(request, companion) };
+  });
+
+  app.delete('/v1/companions/:id', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '陪伴角色需要登录账户。', retryable: false } });
+    const id = (request.params as { id?: string }).id;
+    if (!id || !database.deleteCompanion(principal.id, id)) {
+      return reply.code(404).send({ error: { code: 'companion_not_found', message: '陪伴角色不存在。', retryable: false } });
+    }
+    return { ok: true };
+  });
+
   app.get('/v1/admin/users', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
     return { users: database.listUsers().map(publicUser) };
@@ -373,7 +543,43 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       return reply.code(409).send({ error: { code: 'last_admin', message: '必须至少保留一个启用的管理员。', retryable: false } });
     }
     const updated = database.updateUser(userId, parsed.data, principal.id)!;
+    invalidateRevokedSessions();
     return { user: publicUser(updated) };
+  });
+
+  app.get('/v1/admin/companion-provider/:purpose', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const purpose = (request.params as { purpose: string }).purpose;
+    if (purpose !== 'chat' && purpose !== 'image') return reply.code(400).send({ error: { code: 'invalid_purpose', message: '服务类型无效。', retryable: false } });
+    return { provider: database.publicCompanionProviderSettings(purpose) };
+  });
+  app.put('/v1/admin/companion-provider/:purpose', async (request, reply) => {
+    const principal = requireAdmin(request, reply);
+    if (!principal) return;
+    const purpose = (request.params as { purpose: string }).purpose;
+    const parsed = providerSchema.safeParse(request.body);
+    if ((purpose !== 'chat' && purpose !== 'image') || !parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '陪伴服务配置不正确。', retryable: false } });
+    try { return { provider: database.setCompanionProviderSettings(purpose, parsed.data, principal.id) }; }
+    catch (error) { const publicError = toPublicError(error); return reply.code(publicError.statusCode).send({ error: publicError }); }
+  });
+
+  app.post('/v1/admin/companion-provider/:purpose/test', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const purpose = (request.params as { purpose: string }).purpose;
+    const parsed = providerSchema.pick({ apiBaseUrl: true, apiKey: true, apiMode: true, authMode: true }).partial().safeParse(request.body ?? {});
+    if ((purpose !== 'chat' && purpose !== 'image') || !parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '陪伴服务配置不正确。', retryable: false } });
+    const controller = new AbortController();
+    request.raw.once('aborted', () => controller.abort());
+    reply.raw.once('close', () => { if (!reply.raw.writableEnded) controller.abort(); });
+    try {
+      const current = database.getCompanionProviderSettings(purpose);
+      const draft = resolveProviderSettings(current, { ...current, ...parsed.data, apiBaseUrl: parsed.data.apiBaseUrl, apiKey: parsed.data.apiKey });
+      return { ok: true, models: await provider.listModels(controller.signal, draft) };
+    } catch (error) {
+      const publicError = toPublicError(error);
+      request.log.warn({ event: 'companion_model_test_failed', purpose, errorCode: publicError.code, statusCode: publicError.statusCode }, 'Companion model discovery failed');
+      return reply.code(publicError.statusCode).send({ error: publicError });
+    }
   });
 
   app.get('/v1/admin/provider', async (request, reply) => {
@@ -386,9 +592,12 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     if (!principal) return;
     const parsed = providerSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '模型服务配置不正确。', retryable: false } });
-    const allowedModels = [...new Set([...parsed.data.allowedModels, parsed.data.defaultModel])];
-    const saved = database.updateProviderSettings({ ...parsed.data, allowedModels }, principal.id);
-    return { provider: saved };
+    try {
+      return { provider: database.updateProviderSettings(parsed.data, principal.id) };
+    } catch (error) {
+      const publicError = toPublicError(error);
+      return reply.code(publicError.statusCode).send({ error: publicError });
+    }
   });
 
   app.post('/v1/admin/provider/test', async (request, reply) => {
@@ -405,16 +614,11 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       if (!hasDraft) return { ok: true, models: await provider.listModels(controller.signal) };
       const parsed = providerSchema.safeParse(rawBody);
       if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '模型服务配置不正确。', retryable: false } });
-      const current = database.getProviderSettings();
-      const draft = {
-        ...current,
-        ...parsed.data,
-        apiKey: parsed.data.apiKey?.trim() || current.apiKey,
-        allowedModels: [...new Set([...parsed.data.allowedModels, parsed.data.defaultModel])],
-      };
+      const draft = resolveProviderSettings(database.getProviderSettings(), parsed.data);
       return { ok: true, models: await provider.listModels(controller.signal, draft) };
     } catch (error) {
       const publicError = toPublicError(error);
+      request.log.warn({ event: 'provider_model_test_failed', errorCode: publicError.code, statusCode: publicError.statusCode }, 'Provider model discovery failed');
       return reply.code(publicError.statusCode).send({ error: publicError });
     }
   });
@@ -424,6 +628,8 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     const settings = database.getPublicProviderSettings();
     return { models: settings.allowedModels, defaultModel: settings.defaultModel, apiMode: settings.apiMode };
   });
+
+  registerKnowledgeRoutes(app, database, requireUser);
 
   app.post('/v1/files', async (request, reply) => {
     const principal = requireUser(request, reply);
@@ -483,6 +689,16 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
 
   const validateGeneration = (): { code: string; message: string } | undefined => undefined;
   const jobs = new Map<string, GenerationJob>();
+  function invalidateRevokedSessions() {
+    for (const validate of socketValidators.values()) validate();
+    for (const job of jobs.values()) {
+      if ((job.status === 'queued' || job.status === 'running') && job.principal.sessionId !== 'legacy'
+        && !database.hasActiveSession(job.principal.sessionId, job.principalId)) job.controller.abort();
+    }
+  }
+  // REST-only jobs also stop when their session expires, even without a socket.
+  const sessionSweep = setInterval(invalidateRevokedSessions, 15_000);
+  sessionSweep.unref();
   const JOB_RETENTION_MS = 30 * 60 * 1_000;
 
   const jobResponse = (job: GenerationJob) => ({
@@ -490,10 +706,12 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     conversationId: job.conversationId,
     status: job.status,
     text: job.result?.text || job.text,
-    model: job.result?.model,
-    responseId: job.result?.responseId,
-    usage: job.result?.usage,
+    model: job.payload.companionId ? undefined : job.result?.model,
+    responseId: job.payload.companionId ? undefined : job.result?.responseId,
+    usage: job.payload.companionId ? undefined : job.result?.usage,
     attachments: job.result?.attachments,
+    tools: job.tools,
+    knowledge: job.result?.knowledge,
     error: job.error ? {
       code: job.error.code,
       message: job.error.message,
@@ -503,15 +721,29 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     updatedAt: job.updatedAt,
   });
 
+  database.cleanupGenerationSnapshots();
+  const snapshotCleanup = setInterval(() => database.cleanupGenerationSnapshots(), 60 * 60_000);
+  snapshotCleanup.unref();
+  const snapshotWrites = new Map<string, number>();
+  const persistJob = (job: GenerationJob, force = false) => {
+    if (!force && Date.now() - (snapshotWrites.get(job.requestId) ?? 0) < 250) return;
+    database.saveGenerationSnapshot(job.principalId, job.conversationId, job.requestId, jobResponse(job));
+    snapshotWrites.set(job.requestId, Date.now());
+  };
+  const retentionTimers = new Set<ReturnType<typeof setTimeout>>();
   const retainJob = (job: GenerationJob) => {
-    setTimeout(() => {
-      if (jobs.get(job.requestId) === job && job.status !== 'queued' && job.status !== 'running') jobs.delete(job.requestId);
-    }, JOB_RETENTION_MS).unref?.();
+    const timer = setTimeout(() => {
+      retentionTimers.delete(timer);
+      if (jobs.get(job.requestId) === job && job.status !== 'queued' && job.status !== 'running') { jobs.delete(job.requestId); snapshotWrites.delete(job.requestId); }
+    }, JOB_RETENTION_MS);
+    timer.unref();
+    retentionTimers.add(timer);
   };
 
   const executeJob = async (job: GenerationJob) => {
     job.status = 'running';
     job.updatedAt = Date.now();
+    persistJob(job, true);
     try {
       const result = await provider.generate(
         job.payload,
@@ -520,7 +752,15 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         (delta) => {
           job.text += delta;
           job.updatedAt = Date.now();
+          persistJob(job);
           send(job.socket, { type: 'delta', requestId: job.requestId, delta });
+        },
+        (activity) => {
+          const tools = job.tools ?? [];
+          job.tools = [...tools.filter((item) => item.id !== activity.id), activity].slice(-24);
+          job.updatedAt = Date.now();
+          persistJob(job, true);
+          send(job.socket, { type: 'tool', requestId: job.requestId, activity });
         },
       );
       job.result = result;
@@ -530,15 +770,17 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       job.text = result.text || job.text;
       job.status = 'completed';
       job.updatedAt = Date.now();
+      persistJob(job, true);
       send(job.socket, {
-        type: 'done', requestId: job.requestId, model: result.model, responseId: result.responseId,
-        usage: result.usage, attachments: result.attachments,
+        type: 'done', requestId: job.requestId, model: job.payload.companionId ? undefined : result.model, responseId: job.payload.companionId ? undefined : result.responseId,
+        usage: job.payload.companionId ? undefined : result.usage, attachments: result.attachments, tools: result.tools, knowledge: result.knowledge,
       });
     } catch (error) {
       const publicError = toPublicError(error);
       job.error = publicError;
       job.status = publicError.code === 'cancelled' ? 'cancelled' : 'failed';
       job.updatedAt = Date.now();
+      persistJob(job, true);
       if (job.status === 'cancelled') send(job.socket, { type: 'cancelled', requestId: job.requestId });
       else {
         app.log.warn({ code: publicError.code, requestId: job.requestId, userId: job.principalId }, 'generation failed');
@@ -554,7 +796,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   };
 
   const createJob = (payload: GenerateRequest, principal: Principal, socket?: WebSocket): GenerationJob | undefined => {
-    if (jobs.has(payload.requestId)) return undefined;
+    if (jobs.has(payload.requestId) || database.hasGenerationRequest(payload.requestId)) return undefined;
     const now = Date.now();
     const job: GenerationJob = {
       requestId: payload.requestId,
@@ -571,13 +813,14 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
       promise: Promise.resolve(),
     };
     jobs.set(job.requestId, job);
+    persistJob(job, true);
     job.promise = executeJob(job);
     return job;
   };
 
   const findOwnedJob = (requestId: string, principal: Principal, conversationId: string): GenerationJob | undefined => {
     const job = jobs.get(requestId);
-    if (!job || (job.principalId !== principal.id && principal.role !== 'admin')) return undefined;
+    if (!job || (job.principalId !== principal.id)) return undefined;
     // A request id is not sufficient to restore or cancel a generation. Keep
     // the durable job scoped to the conversation that created it as well.
     if (job.conversationId !== conversationId) return undefined;
@@ -600,6 +843,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     if (!conversationId) return;
     const requestId = (request.params as { requestId?: string }).requestId ?? '';
     const job = findOwnedJob(requestId, principal, conversationId);
+    if (!job) {
+      const saved = database.getGenerationSnapshot(principal.id, conversationId, requestId);
+      if (saved) return saved;
+    }
     if (!job) return reply.code(404).send({ error: { code: 'job_not_found', message: '生成任务不存在或已过期。', retryable: false } });
     return jobResponse(job);
   });
@@ -621,7 +868,9 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     if (!principal) return;
     const parsed = restGenerateSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '请求格式不正确。', retryable: false } });
-    const payload = prepareGeneration(parsed.data, config);
+    const resolved = resolveCompanionPayload(database, principal, parsed.data);
+    if ('error' in resolved) return reply.code(resolved.error.code === 'account_required' ? 403 : 404).send({ error: { ...resolved.error, retryable: false } });
+    const payload = prepareGeneration(resolved.payload, config);
     const invalid = validateGeneration();
     if (invalid) return reply.code(invalid.code === 'history_too_large' ? 413 : 400).send({ error: { ...invalid, retryable: false } });
     const key = principal.id;
@@ -636,7 +885,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     try {
       await job.promise;
       if (request.raw.aborted || reply.raw.destroyed) return;
-      if (job.status === 'completed' && job.result) return { requestId: payload.requestId, ...job.result };
+      if (job.status === 'completed' && job.result) return { requestId: payload.requestId, ...job.result, ...(payload.companionId ? { model: undefined, responseId: undefined, usage: undefined } : {}) };
       const publicError = job.error ?? toPublicError(new Error('generation failed'));
       return reply.code(publicError.statusCode === 499 ? 408 : publicError.statusCode).send({ error: publicError });
     } catch (error) {
@@ -660,14 +909,30 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   sockets.on('connection', (socket) => {
     let principal: Principal | undefined;
     let deviceId = '';
+    let sessionToken = '';
+    const revalidate = () => {
+      if (!principal) return true;
+      const current = principalForToken(database, config, sessionToken);
+      if (!current) {
+        send(socket, { type: 'error', code: 'unauthorized', message: '登录已失效，请重新登录。', retryable: false });
+        socket.close(4401, 'session revoked or expired');
+        socketValidators.delete(socket);
+        return false;
+      }
+      // A role change takes effect on the next frame, not the next login.
+      principal = current;
+      return true;
+    };
+    socketValidators.set(socket, revalidate);
     const helloTimer = setTimeout(() => {
       send(socket, { type: 'error', code: 'hello_timeout', message: '连接握手超时。', retryable: true });
       socket.close(4408, 'hello timeout');
     }, 10_000);
-    const heartbeat = setInterval(() => send(socket, { type: 'pong' }), 15_000);
+    const heartbeat = setInterval(() => { if (revalidate()) send(socket, { type: 'pong' }); }, 15_000);
     const detachJobs = () => {
       clearTimeout(helloTimer);
       clearInterval(heartbeat);
+      socketValidators.delete(socket);
       for (const job of jobs.values()) if (job.socket === socket) job.socket = undefined;
       // A mobile app entering the background is not a cancellation. The job
       // remains owned by the authenticated user and can be polled after resume.
@@ -676,6 +941,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     socket.on('error', detachJobs);
     socket.on('message', (raw: RawData) => {
       void (async () => {
+        if (!revalidate()) return;
         let json: unknown;
         try { json = JSON.parse(raw.toString()); }
         catch { send(socket, { type: 'error', code: 'invalid_json', message: '消息格式无效。', retryable: false }); return; }
@@ -686,6 +952,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
           if (message.type !== 'hello') { send(socket, { type: 'error', code: 'unauthorized', message: '请先登录。', retryable: false }); socket.close(4401, 'unauthorized'); return; }
           principal = principalForToken(database, config, message.accessToken);
           if (!principal) { send(socket, { type: 'error', code: 'unauthorized', message: '登录已失效，请重新登录。', retryable: false }); socket.close(4401, 'unauthorized'); return; }
+          sessionToken = message.accessToken;
           deviceId = message.deviceId;
           clearTimeout(helloTimer);
           send(socket, { type: 'ready' });
@@ -698,9 +965,14 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
           if (job && (job.status === 'queued' || job.status === 'running')) job.controller.abort();
           return;
         }
-        const payload = prepareGeneration(message.payload, config);
+        const resolved = resolveCompanionPayload(database, principal, message.payload);
+        if ('error' in resolved) {
+          send(socket, { type: 'error', requestId: message.payload.requestId, code: resolved.error.code, message: resolved.error.message, retryable: false });
+          return;
+        }
+        const payload = prepareGeneration(resolved.payload, config);
         if (payload.deviceId !== deviceId) { send(socket, { type: 'error', requestId: payload.requestId, code: 'device_mismatch', message: '设备标识不一致。', retryable: false }); return; }
-        if (jobs.has(payload.requestId)) { send(socket, { type: 'error', requestId: payload.requestId, code: 'duplicate_request', message: '重复的请求标识。', retryable: false }); return; }
+        if (jobs.has(payload.requestId) || database.hasGenerationRequest(payload.requestId)) { send(socket, { type: 'error', requestId: payload.requestId, code: 'duplicate_request', message: '重复的请求标识。', retryable: false }); return; }
         const invalid = validateGeneration();
         if (invalid) { send(socket, { type: 'error', requestId: payload.requestId, ...invalid, retryable: false }); return; }
         const key = principal.id;
@@ -710,13 +982,21 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         const job = createJob(payload, principal, socket);
         if (!job) { concurrency.release(key); send(socket, { type: 'error', requestId: payload.requestId, code: 'duplicate_request', message: '重复的请求标识。', retryable: false }); return; }
         send(socket, { type: 'started', requestId: payload.requestId });
-      })();
+      })().catch((error: unknown) => {
+        app.log.error({ err: error }, 'WebSocket frame processing failed');
+        send(socket, { type: 'error', code: 'internal_error', message: '网关处理消息失败，请稍后重试。', retryable: true });
+        socket.close(1011, 'internal error');
+      });
     });
   });
 
   app.addHook('onClose', async () => {
+    clearInterval(sessionSweep);
+    clearInterval(snapshotCleanup);
     for (const job of jobs.values()) if (job.status === 'queued' || job.status === 'running') job.controller.abort();
     await Promise.allSettled([...jobs.values()].map((job) => job.promise));
+    for (const timer of retentionTimers) clearTimeout(timer);
+    retentionTimers.clear();
     for (const client of sockets.clients) client.terminate();
     sockets.close();
     database.close();

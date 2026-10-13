@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Test self-hosted URL switching independently of the release shell's preset.
+vi.hoisted(() => vi.stubEnv('EXPO_PUBLIC_GATEWAY_URL', ''));
+afterAll(() => vi.unstubAllEnvs());
 
 vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
@@ -36,6 +40,20 @@ function currentMessages() {
 }
 
 describe('account-scoped local state', () => {
+  it('applies a refreshed default model before exposing the authenticated screen', async () => {
+    await useAppStore.getState().setSession('token-b', userB, 'https://new.example.com');
+    useAppStore.getState().updateSettings({ model: 'removed-model' });
+    await useAppStore.getState().restoreUserState(userB, { models: ['new-default'], defaultModel: 'new-default' });
+    expect(useAppStore.getState().settings.model).toBe('new-default');
+    expect(useAppStore.getState().authStatus).toBe('authenticated');
+  });
+
+  it('uses the explicitly authenticated server when switching self-hosted gateways', async () => {
+    useAppStore.getState().updateSettings({ serverUrl: 'https://old.example.com' });
+    await useAppStore.getState().setSession('token-b', userB, 'https://new.example.com');
+    expect(useAppStore.getState().settings.serverUrl).toBe('https://new.example.com');
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
     await useAppStore.getState().clearSession();
@@ -68,4 +86,11 @@ describe('account-scoped local state', () => {
     expect(useAppStore.getState().dataOwnerId).toBe('user-b');
     expect(currentMessages()).toEqual([]);
   });
+});
+
+it('does not carry explicit library opt-in across accounts', async () => {
+  await useAppStore.getState().setSession('token-a', userA, 'https://library.example');
+  useAppStore.getState().updateSettings({ knowledgeBase: true });
+  await useAppStore.getState().setSession('token-b', userB, 'https://library.example');
+  expect(useAppStore.getState().settings.knowledgeBase).toBe(false);
 });

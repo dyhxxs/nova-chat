@@ -1,6 +1,6 @@
 {
   "name": "@nova-chat/gateway",
-  "version": "1.1.13",
+  "version": "1.1.27",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,11 +16,12 @@
     "@fastify/helmet": "^13.1.1",
     "@fastify/multipart": "^10.1.1",
     "@fastify/rate-limit": "^11.2.0",
-    "@nova-chat/protocol": "1.1.13",
+    "@nova-chat/protocol": "1.1.27",
     "dotenv": "^17.2.3",
     "fastify": "^5.12.1",
     "fflate": "^0.8.3",
     "openai": "^7.5.0",
+    "pdfjs-dist": "6.3.289",
     "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
@@ -35,6 +36,6 @@
     "vitest": "^4.1.11"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   }
 }

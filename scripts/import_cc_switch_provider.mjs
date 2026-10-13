@@ -77,13 +77,12 @@ const saved = appDb.updateProviderSettings({
 console.log(JSON.stringify({
   imported: true,
   providerName: current.name,
-  apiBaseUrl: saved.apiBaseUrl,
+  apiBaseUrlSet: saved.apiBaseUrlSet,
   apiMode: saved.apiMode,
   authMode: saved.authMode,
   defaultModel: saved.defaultModel,
   allowedModels: saved.allowedModels,
   apiKeySet: saved.apiKeySet,
-  apiKeyPreview: saved.apiKeyPreview,
   adminEmail: admin.email,
 }, null, 2));
 

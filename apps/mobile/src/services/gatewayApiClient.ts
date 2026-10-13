@@ -1,6 +1,9 @@
-import type { AttachmentRef } from '@nova-chat/protocol';
+import { COMPANION_PROFILE_VERSION_HEADER, companionProfileInputSchema, companionProfileSchema, knowledgeImportInfoSchema, type CompanionProfile, type CompanionProfileInput } from '@nova-chat/protocol';
+import { z } from 'zod';
+import { knowledgeDocumentSchema, knowledgeResultSchema, type KnowledgeResult, type KnowledgeDocument, type AttachmentRef, type ToolActivity } from '@nova-chat/protocol';
 import { File, UploadType } from 'expo-file-system';
 import { Platform } from 'react-native';
+import { gatewayHttpErrorMessage } from '../lib/gatewayHttpError';
 import { normalizeServerUrl, toRestUrl } from '../lib/connection';
 import type { PendingAttachment, UserProfile } from '../types';
 import { normalizeUserProfile } from '../lib/userDisplayName';
@@ -17,6 +20,7 @@ export type SetupStatus = {
   needsBootstrap: boolean;
   bootstrapTokenRequired: boolean;
   registrationEnabled: boolean;
+  providerConfigured?: boolean;
 };
 
 export type AttachmentUploadProgress = {
@@ -25,18 +29,17 @@ export type AttachmentUploadProgress = {
 };
 
 export type ProviderAdminSettings = {
-  apiBaseUrl: string;
+  apiBaseUrlSet: boolean;
   apiMode: 'responses' | 'chat-completions';
   authMode: 'bearer' | 'api-key' | 'none';
   defaultModel: string;
   allowedModels: string[];
   apiKeySet: boolean;
-  apiKeyPreview: string;
   updatedAt?: number;
 };
 
 export type ProviderTestInput = {
-  apiBaseUrl: string;
+  apiBaseUrl?: string;
   apiKey?: string;
   apiMode: 'responses' | 'chat-completions';
   authMode: 'bearer' | 'api-key' | 'none';
@@ -55,6 +58,8 @@ export type GenerationJob = {
   responseId?: string;
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
   attachments?: AttachmentRef[];
+  tools?: ToolActivity[];
+  knowledge?: KnowledgeResult;
   error?: { code: string; message: string; retryable: boolean };
   createdAt: number;
   updatedAt: number;
@@ -87,20 +92,24 @@ async function requestJson<T>(
       headers: {
         ...(hasBody && !isFormData ? { 'content-type': 'application/json' } : {}),
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
+        ...(route.startsWith('/v1/companions') ? { [COMPANION_PROFILE_VERSION_HEADER]: '2' } : {}),
         ...(headers ?? {}),
       },
       signal: controller.signal,
     });
     const text = await response.text();
-    let data: any = {};
-    try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+    let data: any;
+    try { data = text ? JSON.parse(text) : undefined; } catch { /* A proxy can return HTML, including HTTP 200. */ }
     if (!response.ok) {
       throw new GatewayApiError(
         String(data?.error?.code ?? `http_${response.status}`),
-        String(data?.error?.message ?? `服务器返回了 ${response.status}。`),
+        String(data?.error?.message ?? gatewayHttpErrorMessage(response.status)),
         Boolean(data?.error?.retryable ?? response.status >= 500),
         response.status,
       );
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new GatewayApiError('invalid_gateway_response', '服务器返回的不是有效网关数据，请联系管理员检查入口地址和反向代理。', true, response.status);
     }
     return data as T;
   } catch (error) {
@@ -124,7 +133,7 @@ export async function login(serverUrl: string, input: { email: string; password:
   return normalizeAuthResponse(await requestJson<AuthResponse>(serverUrl, '/v1/auth/login', { method: 'POST', body: JSON.stringify(input) }));
 }
 
-export async function register(serverUrl: string, input: { email: string; password: string; displayName: string; deviceId: string }): Promise<AuthResponse> {
+export async function register(serverUrl: string, input: { email: string; password: string; displayName?: string; deviceId: string }): Promise<AuthResponse> {
   return normalizeAuthResponse(await requestJson<AuthResponse>(serverUrl, '/v1/auth/register', { method: 'POST', body: JSON.stringify(input) }));
 }
 
@@ -132,13 +141,70 @@ export async function bootstrapAdmin(serverUrl: string, input: { email: string; 
   return normalizeAuthResponse(await requestJson<AuthResponse>(serverUrl, '/v1/auth/bootstrap', { method: 'POST', body: JSON.stringify(input) }));
 }
 
-export async function getMe(serverUrl: string, accessToken: string): Promise<UserProfile> {
-  const data = await requestJson<{ user: UserProfile }>(serverUrl, '/v1/auth/me', { accessToken });
+export async function getMe(serverUrl: string, accessToken: string, signal?: AbortSignal): Promise<UserProfile> {
+  const data = await requestJson<{ user: UserProfile }>(serverUrl, '/v1/auth/me', { accessToken, signal });
   return normalizeUserProfile(data.user);
 }
 
 export function logout(serverUrl: string, accessToken: string): Promise<{ ok: true }> {
   return requestJson(serverUrl, '/v1/auth/logout', { method: 'POST', accessToken });
+}
+
+const companionsResponseSchema = z.object({ companions: z.array(companionProfileSchema).max(100) });
+const companionResponseSchema = z.object({ companion: companionProfileSchema });
+
+function parseCompanionResponse<T>(schema: z.ZodType<T>, data: unknown): T {
+  const parsed = schema.safeParse(data);
+  if (!parsed.success) throw new GatewayApiError('invalid_companion_response', '服务器返回的陪伴角色格式不正确，请升级 Gateway。', false, 200);
+  return parsed.data;
+}
+
+export async function listCompanions(serverUrl: string, accessToken: string, signal?: AbortSignal): Promise<CompanionProfile[]> {
+  return parseCompanionResponse(companionsResponseSchema, await requestJson(serverUrl, '/v1/companions', { accessToken, signal })).companions;
+}
+
+export async function createCompanion(serverUrl: string, accessToken: string, input: CompanionProfileInput): Promise<CompanionProfile> {
+  const safeInput = companionProfileInputSchema.parse(input);
+  return parseCompanionResponse(companionResponseSchema, await requestJson(serverUrl, '/v1/companions', { method: 'POST', accessToken, body: JSON.stringify(safeInput) })).companion;
+}
+
+export async function updateCompanion(serverUrl: string, accessToken: string, id: string, input: CompanionProfileInput): Promise<CompanionProfile> {
+  const safeInput = companionProfileInputSchema.parse(input);
+  return parseCompanionResponse(companionResponseSchema, await requestJson(serverUrl, `/v1/companions/${encodeURIComponent(id)}`, { method: 'PATCH', accessToken, body: JSON.stringify(safeInput) })).companion;
+}
+
+export function deleteCompanion(serverUrl: string, accessToken: string, id: string): Promise<{ ok: true }> {
+  return requestJson(serverUrl, `/v1/companions/${encodeURIComponent(id)}`, { method: 'DELETE', accessToken });
+}
+
+const sessionListSchema = z.object({ sessions: z.array(z.object({
+  id: z.string().uuid(), deviceId: z.string().max(128), createdAt: z.number().finite(), expiresAt: z.number().finite(), current: z.boolean(),
+})) });
+export type LoginSession = z.infer<typeof sessionListSchema>['sessions'][number];
+
+export async function listLoginSessions(serverUrl: string, accessToken: string, signal?: AbortSignal): Promise<LoginSession[]> {
+  const data = await requestJson(serverUrl, '/v1/auth/sessions', { accessToken, signal });
+  const parsed = sessionListSchema.safeParse(data);
+  if (!parsed.success) throw new GatewayApiError('invalid_gateway_response', '服务器返回的登录会话列表格式不正确，请升级 Gateway。', false, 200);
+  return parsed.data.sessions;
+}
+
+async function securityMutation<T>(schema: z.ZodType<T>, request: Promise<unknown>): Promise<T> {
+  const parsed = schema.safeParse(await request);
+  if (!parsed.success) throw new GatewayApiError('invalid_gateway_response', '服务器未返回有效的安全操作确认，请刷新会话列表检查结果。', false, 200);
+  return parsed.data;
+}
+
+export function revokeLoginSession(serverUrl: string, accessToken: string, sessionId: string): Promise<{ ok: true; currentSessionRevoked: boolean }> {
+  return securityMutation(z.object({ ok: z.literal(true), currentSessionRevoked: z.boolean() }), requestJson(serverUrl, `/v1/auth/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', accessToken }));
+}
+
+export function revokeOtherLoginSessions(serverUrl: string, accessToken: string): Promise<{ ok: true; revoked: number }> {
+  return securityMutation(z.object({ ok: z.literal(true), revoked: z.number().int().nonnegative() }), requestJson(serverUrl, '/v1/auth/sessions/revoke-others', { method: 'POST', accessToken }));
+}
+
+export function changeAccountPassword(serverUrl: string, accessToken: string, currentPassword: string, newPassword: string): Promise<{ ok: true }> {
+  return securityMutation(z.object({ ok: z.literal(true) }), requestJson(serverUrl, '/v1/auth/password', { method: 'POST', accessToken, body: JSON.stringify({ currentPassword, newPassword }) }));
 }
 
 export async function updateProfile(serverUrl: string, accessToken: string, patch: { displayName: string }): Promise<UserProfile> {
@@ -216,8 +282,8 @@ export async function uploadAvatar(serverUrl: string, accessToken: string, file:
   }
 }
 
-export async function fetchGatewayModels(serverUrl: string, accessToken: string): Promise<{ models: string[]; defaultModel: string; apiMode: string }> {
-  return requestJson(serverUrl, '/v1/models', { accessToken });
+export async function fetchGatewayModels(serverUrl: string, accessToken: string, signal?: AbortSignal): Promise<{ models: string[]; defaultModel: string; apiMode: string }> {
+  return requestJson(serverUrl, '/v1/models', { accessToken, signal });
 }
 
 function serverLabel(serverUrl: string): string {
@@ -330,20 +396,38 @@ export async function updateUser(serverUrl: string, accessToken: string, userId:
   return normalizeUserProfile(data.user);
 }
 
+const providerSummarySchema = z.object({
+  apiBaseUrlSet: z.boolean(), apiKeySet: z.boolean(),
+  apiMode: z.enum(['responses', 'chat-completions']),
+  authMode: z.enum(['bearer', 'api-key', 'none']),
+  defaultModel: z.string(), allowedModels: z.array(z.string()), updatedAt: z.number().optional(),
+});
+
+function privateProviderSummary(value: unknown): ProviderAdminSettings {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  // Strip legacy server URL/key/preview and every unknown field before returning to any UI.
+  const result = providerSummarySchema.safeParse({
+    ...source,
+    apiBaseUrlSet: typeof source.apiBaseUrlSet === 'boolean' ? source.apiBaseUrlSet : Boolean(source.apiBaseUrl),
+  });
+  if (!result.success) throw new GatewayApiError('invalid_provider_response', '模型服务状态格式不正确，请更新网关。', false, 502);
+  return result.data;
+}
+
 export async function getProviderSettings(serverUrl: string, accessToken: string): Promise<ProviderAdminSettings> {
   const data = await requestJson<{ provider: ProviderAdminSettings }>(serverUrl, '/v1/admin/provider', { accessToken });
-  return data.provider;
+  return privateProviderSummary(data.provider);
 }
 
 export async function saveProviderSettings(
   serverUrl: string,
   accessToken: string,
-  input: Omit<ProviderAdminSettings, 'apiKeySet' | 'apiKeyPreview' | 'updatedAt'> & { apiKey?: string },
+  input: ProviderTestInput,
 ): Promise<ProviderAdminSettings> {
   const data = await requestJson<{ provider: ProviderAdminSettings }>(serverUrl, '/v1/admin/provider', {
     method: 'PUT', body: JSON.stringify(input), accessToken,
   });
-  return data.provider;
+  return privateProviderSummary(data.provider);
 }
 
 export async function testProvider(serverUrl: string, accessToken: string, input?: ProviderTestInput): Promise<string[]> {
@@ -383,4 +467,51 @@ export function cancelGenerationJob(
     generationJobRoute(requestId, conversationId, 'cancel'),
     { method: 'POST', accessToken, timeoutMs: 10_000 },
   );
+}
+
+const knowledgeListSchema = z.object({
+  documents: z.array(knowledgeDocumentSchema).max(100),
+  usage: z.object({ documents: z.number(), chars: z.number() }),
+  limits: z.object({ documents: z.number(), totalChars: z.number(), documentChars: z.number() }),
+});
+export async function listKnowledge(serverUrl: string, accessToken: string) {
+  return knowledgeListSchema.parse(await requestJson(serverUrl, '/v1/knowledge', { accessToken }));
+}
+export async function getKnowledge(serverUrl: string, accessToken: string, id: string) {
+  const data = await requestJson(serverUrl, '/v1/knowledge/' + encodeURIComponent(id), { accessToken });
+  return z.object({ document: knowledgeDocumentSchema.extend({ text: z.string().max(120_000) }) }).parse(data).document;
+}
+export async function saveKnowledge(serverUrl: string, accessToken: string, input: { title: string; text: string; expectedUpdatedAt?: number }, id?: string) {
+  const data = await requestJson(serverUrl, '/v1/knowledge' + (id ? '/' + encodeURIComponent(id) : ''), { accessToken, method: id ? 'PUT' : 'POST', body: JSON.stringify(input), timeoutMs: 30_000 });
+  return z.object({ document: knowledgeDocumentSchema, duplicate: z.boolean() }).parse(data);
+}
+export async function importKnowledge(serverUrl: string, accessToken: string, fileId: string) {
+  return z.object({ document: knowledgeDocumentSchema, duplicate: z.boolean(), importInfo: knowledgeImportInfoSchema.optional() }).parse(await requestJson(serverUrl, '/v1/knowledge/import', { accessToken, method: 'POST', body: JSON.stringify({ fileId }), timeoutMs: 30_000 }));
+}
+export function deleteKnowledge(serverUrl: string, accessToken: string, id: string): Promise<{ ok: true }> {
+  return requestJson(serverUrl, '/v1/knowledge/' + encodeURIComponent(id), { accessToken, method: 'DELETE' });
+}
+export async function searchKnowledge(serverUrl: string, accessToken: string, query: string): Promise<KnowledgeResult> {
+  return knowledgeResultSchema.parse(await requestJson(serverUrl, '/v1/knowledge/search?q=' + encodeURIComponent(query), { accessToken }));
+}
+export type { KnowledgeDocument };
+
+export async function getCompanionProviderSettings(serverUrl: string, accessToken: string, purpose: 'chat' | 'image'): Promise<ProviderAdminSettings> {
+  const data = await requestJson<{ provider: ProviderAdminSettings }>(serverUrl, `/v1/admin/companion-provider/${purpose}`, { accessToken });
+  return privateProviderSummary(data.provider);
+}
+export async function saveCompanionProviderSettings(serverUrl: string, accessToken: string, purpose: 'chat' | 'image', input: ProviderTestInput): Promise<ProviderAdminSettings> {
+  const data = await requestJson<{ provider: ProviderAdminSettings }>(serverUrl, `/v1/admin/companion-provider/${purpose}`, { method: 'PUT', accessToken, body: JSON.stringify(input) });
+  return privateProviderSummary(data.provider);
+}
+
+export async function testCompanionProvider(serverUrl: string, accessToken: string, purpose: 'chat' | 'image', input?: Pick<ProviderTestInput, 'apiBaseUrl' | 'apiKey' | 'apiMode' | 'authMode'>): Promise<string[]> {
+  const data = await requestJson(serverUrl, `/v1/admin/companion-provider/${purpose}/test`, {
+    method: 'POST', accessToken, timeoutMs: 30_000, ...(input ? { body: JSON.stringify(input) } : {}),
+  });
+  return z.object({ ok: z.literal(true), models: z.array(z.string().min(1).max(100)).max(1000) }).parse(data).models;
+}
+
+export async function getCompanion(serverUrl: string, accessToken: string, id: string): Promise<CompanionProfile> {
+  return parseCompanionResponse(companionResponseSchema, await requestJson(serverUrl, `/v1/companions/${encodeURIComponent(id)}`, { accessToken })).companion;
 }

@@ -9,11 +9,22 @@ import type { AttachmentUploadState, PendingAttachment } from '../types';
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
 type Props = {
+  companion?: boolean;
+  companionName?: string;
+  text: string;
+  onChangeText: (text: string) => void;
+  onSentDraft: (expectedDraft: string) => void;
   generating: boolean;
   uploading: boolean;
   attachments: PendingAttachment[];
   uploadStates?: Record<string, AttachmentUploadState>;
   reasoningLabel: string;
+  autoTools: boolean;
+  knowledgeBase: boolean;
+  onToggleKnowledge: () => void;
+  onOpenKnowledge: () => void;
+  toolStatus?: string;
+  onToggleAutoTools: () => void;
   webSearch: boolean;
   codeInterpreter: boolean;
   onOpenOptions: () => void;
@@ -37,11 +48,17 @@ function formatBytes(bytes?: number): string {
 }
 
 export function Composer({
+  companion = false, companionName,
+  text, onChangeText, onSentDraft,
   generating,
   uploading,
   attachments,
   uploadStates,
   reasoningLabel,
+  autoTools,
+  knowledgeBase, onToggleKnowledge, onOpenKnowledge,
+  toolStatus,
+  onToggleAutoTools,
   webSearch,
   codeInterpreter,
   onOpenOptions,
@@ -57,14 +74,14 @@ export function Composer({
   onInputContentSizeChange,
 }: Props) {
   const theme = useAppTheme();
-  const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [attachmentTrayOpen, setAttachmentTrayOpen] = useState(false);
   const inputRef = useRef<TextInput>(null);
   const submittingRef = useRef(false);
   const busy = uploading || submitting;
   const hasContent = text.trim().length > 0 || attachments.length > 0;
-  const canSend = hasContent && !busy;
+  const canSend = hasContent && !busy && !generating;
   const attachmentsFull = attachments.length >= 8;
 
   const submit = useCallback(async () => {
@@ -74,7 +91,7 @@ export function Composer({
     try {
       const sent = await onSend(text.trim());
       if (sent) {
-        setText('');
+        onSentDraft(text);
         setAttachmentTrayOpen(false);
         Keyboard.dismiss();
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -83,7 +100,7 @@ export function Composer({
       submittingRef.current = false;
       setSubmitting(false);
     }
-  }, [canSend, onSend, text]);
+  }, [canSend, onSend, onSentDraft, text]);
 
   const chooseAttachment = useCallback((action: () => void) => {
     if (busy || attachmentsFull) return;
@@ -243,24 +260,31 @@ export function Composer({
         </ScrollView>
       )}
 
-      <ScrollView
+      {!companion && knowledgeBase && <Text style={{ color: theme.colors.textSecondary, paddingHorizontal: 12, paddingBottom: 6, fontSize: 12 }}>资料模式：相关片段会发给模型；本轮不调用搜索或代码工具。请用具体关键词提问。</Text>}
+      {!companion && <Pressable accessibilityLabel="对话工具" onPress={() => setToolsOpen(value => !value)} style={{ alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 8, flexDirection: 'row', gap: 6 }}><Ionicons name="options-outline" size={16} color={theme.colors.textSecondary} /><Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{toolsOpen ? '收起工具' : '工具与选项'}</Text></Pressable>}
+      {!companion && toolsOpen && <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.featureBar}
       >
         {featureChip(reasoningLabel, 'sparkles-outline', onOpenOptions, true)}
-        {featureChip('网页搜索', 'globe-outline', onToggleWebSearch, webSearch)}
-        {featureChip('代码工具', 'code-slash-outline', onToggleCodeInterpreter, codeInterpreter)}
+        {toolStatus ? <View accessibilityLiveRegion="polite" style={{ justifyContent: 'center', paddingHorizontal: 4 }}><Text style={{ color: theme.colors.primary, fontSize: 12 }}>{toolStatus}</Text></View> : null}
+        {featureChip('资料问答', 'library-outline', onToggleKnowledge, knowledgeBase)}
+        {featureChip('管理资料', 'folder-open-outline', onOpenKnowledge)}
+        {!knowledgeBase && featureChip('常用工具', 'construct-outline', onToggleAutoTools, autoTools)}
+        {!knowledgeBase && featureChip('上游搜索', 'globe-outline', onToggleWebSearch, webSearch)}
+        {!knowledgeBase && featureChip('上游代码', 'code-slash-outline', onToggleCodeInterpreter, codeInterpreter)}
         {featureChip(attachmentTrayOpen ? '收起附件' : '添加附件', attachmentTrayOpen ? 'chevron-down' : 'attach-outline', () => setAttachmentTrayOpen((open) => !open), attachmentTrayOpen)}
-      </ScrollView>
+      </ScrollView>}
 
       {attachmentTrayOpen && (
         <View style={[styles.tray, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
           <View style={styles.trayGrid}>
             {trayItem('相机', '立即拍照', 'camera-outline', onTakePhoto)}
             {trayItem('相册', '选择图片', 'images-outline', onAddImage)}
-            {trayItem('文件', '从设备选择', 'document-text-outline', onAddDocument)}
+            {!companion && trayItem('文件', '从设备选择', 'document-text-outline', onAddDocument)}
+            {companion && trayItem('看你的照片', '发一张近照', 'person-outline', () => { void onSend('你在干嘛？发张你的照片给我看看。'); })}
           </View>
           <Text style={[styles.trayHint, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>最多 8 个附件，单个不超过 25 MB。</Text>
         </View>
@@ -289,8 +313,8 @@ export function Composer({
         <TextInput
           ref={inputRef}
           value={text}
-          onChangeText={setText}
-          placeholder={uploading ? '正在上传附件…' : '给 Nova 发消息…'}
+          onChangeText={onChangeText}
+          placeholder={uploading ? '正在上传附件…' : companion ? `给 ${companionName || 'TA'} 发消息…` : '输入消息…'}
           placeholderTextColor={theme.colors.textTertiary}
           style={[styles.input, { color: theme.colors.text, fontFamily: theme.fonts.regular }]}
           multiline

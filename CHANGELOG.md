@@ -1,5 +1,37 @@
 # Changelog
 
+## [1.1.27] - 2026-10-13
+
+### Highlights
+
+- Add AI companions with editable personality, speaking style, user-managed memory and appearance.
+- Introduce the v8 default character: an adult female sophomore with a distinct voice, short everyday replies and mood carried through conversation context.
+- Preserve custom persona fields when upgrading exact legacy defaults; retain memories and reference photos.
+- Add reference-face character photos, appearance upload/cropping and recovery from failed photo requests.
+- Separate regular chat, companion chat and companion image providers, with administrator model discovery, searchable selection and explicit save.
+- Keep provider addresses and keys write-only; require a replacement key when changing destinations.
+- Refresh the app with warm white and muted green, separate companion conversations and clearer character settings.
+- Publish updated Chinese/English introductions, a product hero and companion setup documentation.
+
+### Features included since the last main-branch release
+
+- Personal knowledge library with document extraction, PDF page references, source excerpts and account-scoped drafts.
+- Built-in time, weather, calculation, unit/date/currency conversion, search and public-webpage tools.
+- Chat pinning, archiving, history search, bookmarks, persistent drafts, independent conversation branches and backups.
+- Custom assistant templates and separate assistant backups.
+- Device speech playback controls, account session management and connection diagnostics.
+- Native SQLite snapshot storage with guarded migrations, retained recovery archives and account/gateway isolation.
+- Durable generation recovery, safer request cancellation and release metadata validation.
+
+### Verification and scope
+
+- 437 mobile, 287 gateway and 58 script checks pass (782 total).
+- Workspace typechecks, lint, builds and release metadata validation pass.
+- Android installation, real companion conversations and character photos verified in MuMu.
+- Native iOS installation and broader physical-device coverage remain to be verified.
+- This is a source update; available APKs are determined by actual GitHub Release assets.
+- See [1.1.27 release notes](docs/RELEASE_1.1.27.md).
+
 ## [1.1.13] - 2026-09-04
 
 ### Highlights

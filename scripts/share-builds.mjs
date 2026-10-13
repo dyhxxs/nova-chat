@@ -94,7 +94,7 @@ const server = createServer(async (request, response) => {
         const href = `/download/${file.split('/').map(encodeURIComponent).join('/')}?token=${encodeURIComponent(token)}`;
         return `<li><a href="${href}" rel="noreferrer">${escapeHtml(file)}</a></li>`;
       }).join('');
-      sendText(response, 200, `<!doctype html><meta name="viewport" content="width=device-width"><title>Nova Chat Builds</title><style>body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;background:#0e0f13;color:#f4f4f5}a{color:#7ca7ff}li{margin:16px 0}.note{color:#a1a1aa}</style><h1>Nova Chat 安装包</h1><p class="note">此临时下载地址包含访问令牌，请勿转发；下载完成后请运行停止脚本。</p><ul>${items || '<li>暂无可下载构建</li>'}</ul>`, 'text/html; charset=utf-8');
+      sendText(response, 200, `<!doctype html><meta name="viewport" content="width=device-width"><title>Nova Chat Builds</title><style>body{font:16px system-ui;max-width:760px;margin:40px auto;padding:0 20px;background:#0e0f13;color:#f4f4f5}a{color:#7ca7ff}li{margin:16px 0}.note{color:#a1a1aa}</style><h1>Nova Chat 安装包</h1><p class="note">此页面提供安卓安装包临时下载。可将完整链接转发给受信任的朋友，请勿公开传播；管理员电脑离线后链接将失效。</p><ul>${items || '<li>暂无可下载构建</li>'}</ul>`, 'text/html; charset=utf-8');
       return;
     }
     if (!url.pathname.startsWith('/download/')) {
@@ -129,7 +129,7 @@ const server = createServer(async (request, response) => {
     const end = range?.end ?? details.size - 1;
     const partial = range !== undefined;
     response.writeHead(partial ? 206 : 200, {
-      'content-type': 'application/octet-stream',
+      'content-type': path.extname(absolute).toLowerCase() === '.apk' ? 'application/vnd.android.package-archive' : 'application/octet-stream',
       'content-length': String(end - start + 1),
       ...(partial ? { 'content-range': `bytes ${start}-${end}/${details.size}` } : {}),
       'accept-ranges': 'bytes',

@@ -64,6 +64,18 @@ describe('assistant generation model state', () => {
     expect(state.prepareRegeneration(turn.conversationId, turn.assistantMessageId)).toBe(false);
   });
 
+  it('preserves a nonretryable photo error and does not truncate later history on a retry', () => {
+    const state = useAppStore.getState();
+    const first = state.beginTurn('发张照片');
+    state.failAssistant(first.conversationId, first.assistantMessageId, '图片服务未接受这次描述', false, undefined, 'provider_content_rejected');
+    const followup = state.beginTurn('换个话题', [], first.conversationId);
+    state.completeAssistant(followup.conversationId, followup.assistantMessageId);
+    const before = useAppStore.getState().conversations;
+    expect(state.prepareRegeneration(first.conversationId, first.assistantMessageId)).toBe(false);
+    expect(useAppStore.getState().conversations).toBe(before);
+    expect(assistantMessage(first.conversationId, first.assistantMessageId)).toMatchObject({ errorCode: 'provider_content_rejected', retryable: false, status: 'error' });
+  });
+
   it('persists the durable request and frozen generation options for a turn', () => {
     vi.setSystemTime(new Date('2026-09-03T04:00:00.000Z'));
     const state = useAppStore.getState();

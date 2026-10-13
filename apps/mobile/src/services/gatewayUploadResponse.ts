@@ -1,3 +1,4 @@
+import { gatewayHttpErrorMessage } from '../lib/gatewayHttpError';
 import type { AttachmentRef } from '@nova-chat/protocol';
 
 export class GatewayUploadResponseError extends Error {
@@ -44,7 +45,7 @@ export function parseGatewayUploadResponse(status: number, body: string): Attach
       : null;
     throw new GatewayUploadResponseError(
       typeof error?.code === 'string' ? error.code : `http_${status}`,
-      typeof error?.message === 'string' ? error.message : `服务器返回了 ${status}。`,
+      typeof error?.message === 'string' ? error.message : gatewayHttpErrorMessage(status),
       typeof error?.retryable === 'boolean' ? error.retryable : status >= 500,
       status,
     );

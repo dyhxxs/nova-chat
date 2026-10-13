@@ -1,10 +1,13 @@
+import { knowledgeResultSchema } from '@nova-chat/protocol';
+import { gatewayHttpErrorMessage } from '../lib/gatewayHttpError';
 import Constants from 'expo-constants';
-import type { GenerateRequest, ServerSocketMessage } from '@nova-chat/protocol';
+import type { GenerateRequest, ServerSocketMessage, ToolActivity } from '@nova-chat/protocol';
 import { normalizeServerUrl, toRestUrl, toWebSocketUrl } from '../lib/connection';
 import { cancelGenerationJob, getGenerationJob } from './gatewayApiClient';
 
 export type StreamHandlers = {
   onStarted?: () => void;
+  onTool?: (activity: ToolActivity) => void;
   onDelta: (delta: string) => void;
   /** Replaces the local assistant text when a background job snapshot cannot be appended safely. */
   onTextSnapshot?: (text: string) => void;
@@ -34,7 +37,7 @@ function errorFromResponse(status: number, data: any): JobError {
   const error = data?.error;
   return {
     code: error?.code ?? `http_${status}`,
-    message: error?.message ?? `服务器返回了 ${status}。`,
+    message: error?.message ?? gatewayHttpErrorMessage(status),
     retryable: error?.retryable ?? status >= 500,
   };
 }
@@ -128,6 +131,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
 
   const handleJob = (job: Awaited<ReturnType<typeof getGenerationJob>>) => {
     if (finished || cancelled) return true;
+    job.tools?.forEach((activity) => options.handlers.onTool?.(activity));
     if (job.status === 'queued' || job.status === 'running') {
       notifyStarted();
       deliverSnapshot(job.text);
@@ -143,6 +147,8 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         responseId: job.responseId,
         usage: job.usage,
         attachments: job.attachments,
+        tools: job.tools,
+        knowledge: knowledgeResultSchema.safeParse(job.knowledge).data,
       });
       return true;
     }
@@ -220,14 +226,19 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         body: JSON.stringify(options.request),
         signal: restController.signal,
       });
-      const data = await response.json().catch(() => ({}));
+      const data = await response.json().catch(() => undefined);
       if (!response.ok) {
         fail(errorFromResponse(response.status, data));
         return;
       }
       if (cancelled || finished) return;
+      if (!data || typeof data !== 'object' || typeof data.text !== 'string') {
+        fail({ code: 'invalid_gateway_response', message: '服务器返回的数据格式不正确，请联系管理员检查网关。', retryable: true });
+        return;
+      }
       deliverSnapshot(typeof data.text === 'string' ? data.text : '');
       finish();
+      if (Array.isArray(data.tools)) data.tools.forEach((activity: ToolActivity) => options.handlers.onTool?.(activity));
       options.handlers.onDone({
         type: 'done',
         requestId: options.request.requestId,
@@ -235,6 +246,8 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         responseId: data.responseId,
         usage: data.usage,
         attachments: Array.isArray(data.attachments) ? data.attachments : undefined,
+        tools: Array.isArray(data.tools) ? data.tools : undefined,
+        knowledge: knowledgeResultSchema.safeParse(data.knowledge).data,
       });
     } catch (error) {
       if (cancelled || (error instanceof Error && error.name === 'AbortError')) return;
@@ -282,6 +295,10 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         notifyStarted();
         return;
       }
+      if (message.type === 'tool' && message.requestId === options.request.requestId) {
+        options.handlers.onTool?.(message.activity);
+        return;
+      }
       if (message.type === 'delta' && message.requestId === options.request.requestId) {
         deliveredText += message.delta;
         options.handlers.onDelta(message.delta);
@@ -289,7 +306,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
       }
       if (message.type === 'done' && message.requestId === options.request.requestId) {
         finish();
-        options.handlers.onDone(message);
+        options.handlers.onDone({ ...message, knowledge: knowledgeResultSchema.safeParse(message.knowledge).data });
         return;
       }
       if (message.type === 'cancelled' && message.requestId === options.request.requestId) {
@@ -407,6 +424,7 @@ export function resumeGeneration(options: ResumeOptions): GenerationController {
         return;
       }
       options.handlers.onStarted?.();
+      job.tools?.forEach((activity) => options.handlers.onTool?.(activity));
       deliverSnapshot(job.text);
       if (job.status === 'queued' || job.status === 'running') {
         pollTimer = setTimeout(() => { void pollOnce(); }, POLL_INTERVAL_MS);
@@ -421,6 +439,8 @@ export function resumeGeneration(options: ResumeOptions): GenerationController {
           responseId: job.responseId,
           usage: job.usage,
           attachments: job.attachments,
+        tools: job.tools,
+        knowledge: knowledgeResultSchema.safeParse(job.knowledge).data,
         });
         return;
       }
@@ -436,7 +456,7 @@ export function resumeGeneration(options: ResumeOptions): GenerationController {
       if (apiError.code === 'job_not_found') {
         fail({
           code: 'job_not_found',
-          message: '上次生成任务已过期或网关已重启，可以重新生成。',
+          message: '上次回复没有成功保存，请点按重试。',
           retryable: true,
         });
         return;
@@ -461,7 +481,12 @@ export function resumeGeneration(options: ResumeOptions): GenerationController {
 }
 
 export function startGeneration(options: StartOptions): GenerationController {
-  return startGatewayGeneration(options);
+  let context: GenerateRequest['context'];
+  try {
+    const { timeZone, locale } = Intl.DateTimeFormat().resolvedOptions();
+    context = { timezone: timeZone, locale };
+  } catch { /* Older devices fall back to the gateway's explicit default timezone. */ }
+  return startGatewayGeneration({ ...options, request: { ...options.request, context: options.request.context ?? context } });
 }
 
 export async function testConnection(serverUrl: string, signal?: AbortSignal): Promise<{ model?: string; apiMode?: string }> {
@@ -473,7 +498,7 @@ export async function testConnection(serverUrl: string, signal?: AbortSignal): P
   signal?.addEventListener('abort', forwardAbort, { once: true });
   try {
     const response = await fetch(toRestUrl(normalized, '/health'), { signal: controller.signal });
-    if (!response.ok) throw new Error(`服务器返回了 ${response.status}。`);
+    if (!response.ok) throw new Error(gatewayHttpErrorMessage(response.status));
     const data = await response.json();
     if (!data?.ok) throw new Error('服务器健康检查未通过。');
     return { model: data.defaultModel, apiMode: data.apiMode };

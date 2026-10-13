@@ -44,6 +44,12 @@ const configSchema = z.object({
   MAX_HISTORY_CHARS: numberFromEnv(600_000),
   MAX_HISTORY_MESSAGES: numberFromEnv(DEFAULT_CONTEXT_MESSAGES),
   MAX_OUTPUT_TOKENS: numberFromEnv(32_768),
+  BUILTIN_TOOLS_ENABLED: booleanFromEnv(true),
+  DEFAULT_TIMEZONE: z.string().default('Asia/Shanghai').refine((value) => {
+    try { new Intl.DateTimeFormat('en', { timeZone: value }).format(); return true; } catch { return false; }
+  }, 'DEFAULT_TIMEZONE must be a valid IANA time zone'),
+  TOOL_TIMEOUT_MS: numberFromEnv(12_000).refine((value) => value >= 100 && value <= 60_000, 'TOOL_TIMEOUT_MS must be between 100 and 60000'),
+  BRAVE_SEARCH_API_KEY: z.string().default(''),
   MAX_FILE_BYTES: numberFromEnv(25 * 1024 * 1024),
 });
 
@@ -93,5 +99,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     maxHistoryMessages: config.MAX_HISTORY_MESSAGES,
     maxOutputTokens: config.MAX_OUTPUT_TOKENS,
     maxFileBytes: config.MAX_FILE_BYTES,
+    builtinToolsEnabled: config.BUILTIN_TOOLS_ENABLED,
+    defaultTimezone: config.DEFAULT_TIMEZONE,
+    toolTimeoutMs: config.TOOL_TIMEOUT_MS,
+    braveSearchApiKey: config.BRAVE_SEARCH_API_KEY,
   } as const;
 }

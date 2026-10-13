@@ -2,7 +2,7 @@
   "expo": {
     "name": "Nova Chat",
     "slug": "nova-chat",
-    "version": "1.1.13",
+    "version": "1.1.27",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -16,7 +16,7 @@
           "NSAllowsLocalNetworking": true
         }
       },
-      "buildNumber": "15"
+      "buildNumber": "29"
     },
     "android": {
       "package": "com.novachat.mobile",
@@ -32,7 +32,7 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
-      "versionCode": 15,
+      "versionCode": 29,
       "softwareKeyboardLayoutMode": "resize",
       "allowBackup": false
     },
@@ -68,8 +68,9 @@
             "usesCleartextTraffic": false
           }
         }
-      ]
+      ],
+      "expo-sharing",
+      "expo-sqlite"
     ]
-  },
-  "version": "1.1.13"
+  }
 }

@@ -1,100 +1,21 @@
-import type { ComponentProps } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { ThemedText as Text } from './ThemedText';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAppTheme } from '../hooks/useAppTheme';
 
-type IoniconName = ComponentProps<typeof Ionicons>['name'];
-
-type Props = {
-  onSuggestion: (prompt: string) => void;
-  onTakePhoto: () => void;
-};
-
-const suggestions: { icon: IoniconName; title: string; prompt: string }[] = [
-  { icon: 'git-network-outline', title: '帮我梳理一个复杂问题', prompt: '请帮我把这个复杂问题拆解清楚，指出关键矛盾，并给出可执行的下一步：' },
-  { icon: 'color-wand-outline', title: '帮我写作或润色内容', prompt: '请帮我完成或润色下面的内容，保持自然、清晰，并说明主要修改：' },
-  { icon: 'code-slash-outline', title: '分析代码并给出修复方案', prompt: '请分析这个代码问题，解释根因并给出可以直接落地的完整修复方案：' },
+type Props = { onSuggestion: (prompt: string) => void; onTakePhoto: () => void };
+const suggestions = [
+  { icon: 'create-outline' as const, title: '写点东西', subtitle: '整理思路，让表达更清楚', prompt: '帮我润色这段文字，保留我的语气：' },
+  { icon: 'calendar-outline' as const, title: '安排下一步', subtitle: '把复杂的事拆成小步骤', prompt: '帮我把这个目标拆成今天就能开始的步骤：' },
+  { icon: 'bulb-outline' as const, title: '一起想办法', subtitle: '多一个角度看问题', prompt: '我遇到了一个问题，帮我一起想想：' },
 ];
-
 export function EmptyState({ onSuggestion, onTakePhoto }: Props) {
   const theme = useAppTheme();
-  return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={styles.container}
-      showsVerticalScrollIndicator={false}
-      alwaysBounceVertical={false}
-    >
-      <LinearGradient
-        colors={theme.dark ? ['#8177FF', '#4A42B6'] : ['#847AFF', '#5D54D8']}
-        style={styles.logo}
-      >
-        <Ionicons name="sparkles" size={24} color="#FFFFFF" />
-      </LinearGradient>
-      <Text style={[styles.eyebrow, { color: theme.colors.primary, fontFamily: theme.fonts.bold }]}>NOVA</Text>
-      <Text style={[styles.title, { color: theme.colors.text, fontFamily: theme.fonts.bold }]}>今天想聊点什么？</Text>
-      <Text style={[styles.subtitle, { color: theme.colors.textSecondary, fontFamily: theme.fonts.regular }]}>可以直接提问，也可以拍照、选择图片或添加设备中的文件。</Text>
-
-      <View style={styles.suggestions}>
-        {suggestions.map((item) => (
-          <Pressable
-            key={item.title}
-            accessibilityRole="button"
-            onPress={() => onSuggestion(item.prompt)}
-            style={({ pressed }) => [
-              styles.suggestion,
-              { backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
-              pressed && styles.pressed,
-            ]}
-          >
-            <View style={[styles.suggestionIcon, { backgroundColor: theme.colors.primarySoft }]}>
-              <Ionicons name={item.icon} size={18} color={theme.colors.primary} />
-            </View>
-            <Text style={[styles.suggestionText, { color: theme.colors.text, fontFamily: theme.fonts.medium }]}>{item.title}</Text>
-            <Ionicons name="arrow-forward" size={16} color={theme.colors.textTertiary} />
-          </Pressable>
-        ))}
-        <Pressable
-          accessibilityRole="button"
-          onPress={onTakePhoto}
-          style={({ pressed }) => [
-            styles.suggestion,
-            styles.photoSuggestion,
-            { backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
-            pressed && styles.pressed,
-          ]}
-        >
-          <View style={[styles.suggestionIcon, { backgroundColor: theme.colors.primarySoft }]}>
-            <Ionicons name="camera-outline" size={19} color={theme.colors.primary} />
-          </View>
-          <Text style={[styles.suggestionText, { color: theme.colors.text, fontFamily: theme.fonts.medium }]}>拍照提问或识别内容</Text>
-          <Ionicons name="camera" size={16} color={theme.colors.textTertiary} />
-        </Pressable>
-      </View>
-
-      <View style={styles.privateNote}>
-        <Ionicons name="shield-checkmark-outline" size={14} color={theme.colors.textTertiary} />
-        <Text style={[styles.privateText, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>通过你的私有网关连接，模型密钥不保存在 App 中</Text>
-      </View>
-    </ScrollView>
-  );
+  return <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+    <View style={styles.intro}><View style={[styles.mark, { backgroundColor: theme.colors.primarySoft }]}><Ionicons name="chatbubbles-outline" size={26} color={theme.colors.primary} /></View><Text style={[styles.title, { color: theme.colors.text }]}>让想法慢慢成形。</Text><Text style={[styles.subtitle, { color: theme.colors.textSecondary }]}>一个问题、一段文字，或者今天的新想法。</Text></View>
+    <Text style={[styles.label, { color: theme.colors.textTertiary }]}>从这里开始</Text>
+    <View style={[styles.list, { backgroundColor: theme.colors.surface }]}>{suggestions.map((s, index) => <Pressable key={s.title} onPress={() => onSuggestion(s.prompt)} style={({ pressed }) => [styles.row, { borderColor: theme.colors.border, borderBottomWidth: index < suggestions.length - 1 ? StyleSheet.hairlineWidth : 0, opacity: pressed ? 0.6 : 1 }]}><Ionicons name={s.icon} size={22} color={theme.colors.primary} /><View style={{ flex: 1, gap: 5 }}><Text style={{ color: theme.colors.text, fontSize: 16, fontWeight: '500' }}>{s.title}</Text><Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{s.subtitle}</Text></View><Ionicons name="arrow-forward" size={18} color={theme.colors.textTertiary} /></Pressable>)}</View>
+    <Pressable onPress={onTakePhoto} style={[styles.photo, { borderColor: theme.colors.border }]}><Ionicons name="camera-outline" size={21} color={theme.colors.textSecondary} /><Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>拍张照片，聊聊你看到的</Text></Pressable>
+  </ScrollView>;
 }
-
-const styles = StyleSheet.create({
-  scroll: { flex: 1, width: '100%' },
-  container: { flexGrow: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20, paddingTop: 16, paddingBottom: 22 },
-  logo: { width: 52, height: 52, borderRadius: 18, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
-  eyebrow: { fontSize: 10, fontWeight: '900', letterSpacing: 2.4, marginBottom: 5 },
-  title: { fontSize: 25, lineHeight: 32, fontWeight: '800', letterSpacing: -0.45 },
-  subtitle: { fontSize: 13, lineHeight: 20, textAlign: 'center', marginTop: 7, maxWidth: 320 },
-  suggestions: { width: '100%', maxWidth: 520, gap: 9, marginTop: 24 },
-  suggestion: { minHeight: 54, borderRadius: 18, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center' },
-  photoSuggestion: { marginHorizontal: 15 },
-  suggestionIcon: { width: 34, height: 34, borderRadius: 12, alignItems: 'center', justifyContent: 'center', marginRight: 11 },
-  suggestionText: { flex: 1, fontSize: 14, fontWeight: '600' },
-  privateNote: { maxWidth: 320, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, marginTop: 18 },
-  privateText: { flexShrink: 1, fontSize: 10, lineHeight: 14, textAlign: 'center' },
-  pressed: { opacity: 0.72, transform: [{ scale: 0.985 }] },
-});
+const styles = StyleSheet.create({ content: { flexGrow: 1, width: '100%', maxWidth: 600, alignSelf: 'center', padding: 24, paddingTop: 36, paddingBottom: 28 }, intro: { gap: 14, marginBottom: 34 }, mark: { width: 54, height: 54, borderRadius: 18, alignItems: 'center', justifyContent: 'center', marginBottom: 6 }, title: { fontSize: 30, fontWeight: '600', lineHeight: 42, letterSpacing: -0.5 }, subtitle: { fontSize: 14, lineHeight: 23 }, label: { fontSize: 12, marginBottom: 12 }, list: { borderRadius: 18, overflow: 'hidden' }, row: { minHeight: 82, paddingHorizontal: 18, paddingVertical: 17, flexDirection: 'row', alignItems: 'center', gap: 16 }, photo: { marginTop: 16, minHeight: 56, borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, gap: 12 } });

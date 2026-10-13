@@ -81,6 +81,35 @@ afterEach(async () => {
 });
 
 describe('gateway server', () => {
+  it('registers an immediately usable non-admin account without a display name or provider fields', async () => {
+    const app = await startServer();
+    await bootstrap(app);
+    const response = await app.inject({ method: 'POST', url: '/v1/auth/register', payload: {
+      email: 'friend@example.com', password: 'friend password 12345', deviceId: 'friend-test-device',
+    } });
+    expect(response.statusCode).toBe(201);
+    const auth = response.json();
+    expect(auth.user).toMatchObject({ displayName: '新用户', role: 'user' });
+    expect(auth.accessToken).toBeTruthy();
+    const me = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: bearer(auth.accessToken) });
+    expect(me.statusCode).toBe(200);
+    const models = await app.inject({ method: 'GET', url: '/v1/models', headers: bearer(auth.accessToken) });
+    expect(models.statusCode).toBe(200);
+    expect(models.json().defaultModel).toBe('gpt-5.6-sol');
+    expect(models.body).not.toContain('environment-provider-key');
+  });
+
+  it('reports missing provider configuration without leaking credentials', async () => {
+    const app = await startServer({ OPENAI_API_KEY: '' });
+    await bootstrap(app);
+    const status = await app.inject({ method: 'GET', url: '/v1/setup/status' });
+    expect(status.json()).toMatchObject({ needsBootstrap: false, registrationEnabled: true, providerConfigured: false });
+    const configured = await startServer();
+    const ready = await configured.inject({ method: 'GET', url: '/v1/setup/status' });
+    expect(ready.json().providerConfigured).toBe(true);
+    expect(ready.body).not.toContain('environment-provider-key');
+  });
+
   it('reports health without exposing secrets', async () => {
     const app = await startServer({ APP_ACCESS_TOKEN: 'legacy-friend-token' });
     const response = await app.inject({ method: 'GET', url: '/health' });
@@ -224,9 +253,8 @@ describe('gateway server', () => {
     const updated = await app.inject({ method: 'PUT', url: '/v1/admin/provider', headers: bearer(admin.accessToken), payload: providerPayload });
     expect(updated.statusCode).toBe(200);
     expect(updated.json().provider).toMatchObject({
-      apiBaseUrl: 'https://provider.example/v1',
+      apiBaseUrlSet: true,
       apiKeySet: true,
-      apiKeyPreview: '••••9876',
       defaultModel: 'gpt-5.6-luna',
       allowedModels: ['gpt-5.6-luna'],
     });
@@ -237,6 +265,12 @@ describe('gateway server', () => {
     expect(fetched.statusCode).toBe(200);
     expect(fetched.body).not.toContain(apiKey);
     expect(fetched.json().provider).not.toHaveProperty('apiKey');
+    for (const response of [updated, fetched]) {
+      expect(response.body).not.toContain('provider.example');
+      expect(response.body).not.toContain('9876');
+      expect(response.json().provider.apiBaseUrl).toBe('');
+      expect(response.json().provider).not.toHaveProperty('apiKeyPreview');
+    }
 
     const models = await app.inject({ method: 'GET', url: '/v1/models', headers: bearer(user.accessToken) });
     expect(models.json()).toMatchObject({ models: ['gpt-5.6-luna'], defaultModel: 'gpt-5.6-luna', apiMode: 'responses' });
@@ -408,5 +442,126 @@ describe('gateway server', () => {
     const response = await app.inject({ method: 'POST', url: '/v1/chat', headers: { authorization: 'Bearer wrong' }, payload: {} });
     expect(response.statusCode).toBe(401);
     expect(response.json().error.code).toBe('unauthorized');
+  });
+});
+
+
+describe('built-in tool discovery', () => {
+  it('requires login and exposes capability names, never search/provider keys', async () => {
+    const app = await startServer({ BRAVE_SEARCH_API_KEY: 'private-search-key' });
+    expect((await app.inject({ method: 'GET', url: '/v1/tools' })).statusCode).toBe(401);
+    await bootstrap(app);
+    const user = await register(app, 91);
+    const response = await app.inject({ method: 'GET', url: '/v1/tools', headers: bearer(user.accessToken) });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().tools).toHaveLength(8);
+    expect(response.json().tools.find((tool: any) => tool.name === 'get_weather').enabled).toBe(true);
+    expect(response.body).not.toContain('private-search-key');
+    expect(response.body).not.toContain('environment-provider-key');
+  });
+});
+
+describe('companion profiles', () => {
+  it('requires a real account and keeps profiles isolated between users', async () => {
+    const app = await startServer({ APP_ACCESS_TOKEN: 'legacy-friend-token' });
+    await bootstrap(app);
+
+    const anonymous = await app.inject({ method: 'GET', url: '/v1/companions' });
+    expect(anonymous.statusCode).toBe(401);
+
+    const legacy = await app.inject({ method: 'GET', url: '/v1/companions', headers: bearer('legacy-friend-token') });
+    expect(legacy.statusCode).toBe(403);
+    expect(legacy.json().error.code).toBe('account_required');
+
+    const first = await register(app, 201);
+    const second = await register(app, 202);
+    const firstList = await app.inject({ method: 'GET', url: '/v1/companions', headers: bearer(first.accessToken) });
+    expect(firstList.statusCode).toBe(200);
+    expect(firstList.json().companions).toHaveLength(1);
+    expect(firstList.json().companions[0]).toMatchObject({ name: 'Lumi', templateId: 'cyber-companion-v1' });
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/companions',
+      headers: bearer(first.accessToken),
+      payload: {
+        name: '小光',
+        personality: ['温柔', '细腻'],
+        speakingStyle: ['自然简洁'],
+        relationshipStage: 'familiar',
+        memoryEnabled: true,
+        memories: ['用户喜欢雨天散步。'],
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const companion = created.json().companion;
+    expect(companion).toMatchObject({ name: '小光', relationshipStage: 'familiar', memoryEnabled: true });
+
+    const crossAccount = await app.inject({ method: 'GET', url: `/v1/companions/${companion.id}`, headers: bearer(second.accessToken) });
+    expect(crossAccount.statusCode).toBe(404);
+    expect(crossAccount.json().error.code).toBe('companion_not_found');
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/v1/companions/${companion.id}`,
+      headers: bearer(first.accessToken),
+      payload: { speakingStyle: ['短句', '只问一个问题'] },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().companion).toMatchObject({
+      name: '小光',
+      personality: ['温柔', '细腻'],
+      speakingStyle: ['短句', '只问一个问题'],
+      memoryEnabled: true,
+      memories: ['用户喜欢雨天散步。'],
+    });
+  });
+
+  it('resolves companionId from the authenticated account before calling the model provider', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 'companion-response', output_text: '我在，慢慢说。' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const app = await startServer();
+    const admin = await bootstrap(app);
+    await app.inject({ method: 'PUT', url: '/v1/admin/companion-provider/chat', headers: bearer(admin.accessToken), payload: { apiBaseUrl: 'https://companion.example/v1', apiKey: 'companion-test-key', apiMode: 'responses', authMode: 'bearer', defaultModel: 'gpt-5.6-sol', allowedModels: ['gpt-5.6-sol'] } });
+    const owner = await register(app, 203);
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/companions',
+      headers: bearer(owner.accessToken),
+      payload: { name: 'Lumi 测试', memoryEnabled: true, memories: ['用户喜欢夜晚散步。'] },
+    });
+    const companionId = created.json().companion.id as string;
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat',
+      headers: bearer(owner.accessToken),
+      payload: {
+        requestId: '33333333-3333-4333-8333-333333333333',
+        conversationId: '44444444-4444-4444-8444-444444444444',
+        deviceId: 'companion-test-device',
+        companionId,
+        messages: [{ role: 'user', content: '今天有点累。', attachments: [] }],
+        options: {
+          model: 'gpt-5.6-sol',
+          reasoningEffort: 'medium',
+          verbosity: 'medium',
+          instructions: '',
+          maxOutputTokens: 4096,
+          webSearch: false,
+          codeInterpreter: false,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.instructions).toContain('Lumi 测试');
+    expect(body.instructions).toContain('用户喜欢夜晚散步');
+    expect(body.instructions).toContain('不得使用内疚、威胁、嫉妒、占有');
+    expect(JSON.stringify(body)).not.toContain(companionId);
   });
 });

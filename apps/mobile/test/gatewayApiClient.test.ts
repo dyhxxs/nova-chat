@@ -6,7 +6,7 @@ vi.mock('expo-file-system', () => ({
   UploadType: { MULTIPART: 0 },
 }));
 
-import { cancelGenerationJob, getGenerationJob, login, logout, removeAvatar, testProvider } from '../src/services/gatewayApiClient';
+import { changeAccountPassword, listLoginSessions, revokeLoginSession, revokeOtherLoginSessions, cancelGenerationJob, fetchSetupStatus, getGenerationJob, login, logout, removeAvatar, testProvider, getProviderSettings, saveProviderSettings } from '../src/services/gatewayApiClient';
 
 const user = {
   id: '00000000-0000-4000-8000-000000000001',
@@ -74,5 +74,73 @@ describe('gateway JSON request headers', () => {
     const [, init] = fetchMock.mock.calls[0]!;
     expect(init?.headers).toEqual(expect.objectContaining({ 'content-type': 'application/json' }));
     expect(JSON.parse(String(init?.body))).toEqual({ email: user.email, password: 'correct-horse-battery-staple', deviceId: 'device-1' });
+  });
+});
+
+
+describe('gateway proxy failures', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([502, 503, 504, 530])('reports HTTP %s without blaming credentials', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html>Cloudflare unavailable</html>', { status })));
+    await expect(fetchSetupStatus('https://gateway.test')).rejects.toMatchObject({
+      code: `http_${status}`, status, retryable: true, message: expect.stringContaining('管理员'),
+    });
+  });
+
+  it.each(['<html>Proxy sign-in page</html>', '', 'null', '[]'])('rejects invalid successful gateway data: %s', async (body) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+    await expect(fetchSetupStatus('https://gateway.test')).rejects.toMatchObject({ code: 'invalid_gateway_response', retryable: true });
+  });
+});
+
+
+describe('security API confirmations', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it('validates session metadata and strips unexpected token fields', async () => {
+    const session = { id: '00000000-0000-4000-8000-000000000001', deviceId: 'test-device', createdAt: 1, expiresAt: 2, current: true };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ sessions: [{ ...session, token: 'do-not-display' }] })));
+    expect(await listLoginSessions('https://gateway.test', 'test-token')).toEqual([session]);
+  });
+  it('rejects malformed session lists and false-success mutation responses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => jsonResponse({ ok: false, sessions: [null] })));
+    await expect(listLoginSessions('https://gateway.test', 'test-token')).rejects.toMatchObject({ code: 'invalid_gateway_response' });
+    await expect(revokeLoginSession('https://gateway.test', 'test-token', 'one')).rejects.toMatchObject({ code: 'invalid_gateway_response' });
+    await expect(revokeOtherLoginSessions('https://gateway.test', 'test-token')).rejects.toMatchObject({ code: 'invalid_gateway_response' });
+    await expect(changeAccountPassword('https://gateway.test', 'test-token', 'old-test-password', 'new-test-password')).rejects.toMatchObject({ code: 'invalid_gateway_response' });
+  });
+  it('encodes identifiers, avoids empty JSON bodies and sends passwords only in the request body', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ ok: true, currentSessionRevoked: false })).mockResolvedValueOnce(jsonResponse({ ok: true, revoked: 2 })).mockResolvedValueOnce(jsonResponse({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    await revokeLoginSession('https://gateway.test', 'test-token', 'path/segment');
+    await revokeOtherLoginSessions('https://gateway.test', 'test-token');
+    await changeAccountPassword('https://gateway.test', 'test-token', 'old-test-password', 'new-test-password');
+    expect(fetchMock.mock.calls[0]![0]).toBe('https://gateway.test/v1/auth/sessions/path%2Fsegment');
+    expect(fetchMock.mock.calls[0]![1].body).toBeUndefined(); expect(fetchMock.mock.calls[1]![1].body).toBeUndefined();
+    expect(JSON.parse(fetchMock.mock.calls[2]![1].body)).toEqual({ currentPassword: 'old-test-password', newPassword: 'new-test-password' });
+    expect(fetchMock.mock.calls[2]![0]).not.toContain('password=');
+  });
+});
+
+
+describe('private administrator provider summaries', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const metadata = { apiBaseUrlSet: true, apiKeySet: true, apiMode: 'responses' as const, authMode: 'bearer' as const, defaultModel: 'model-a', allowedModels: ['model-a'] };
+  it.each(['get', 'save'] as const)('strips secret and unknown fields from %s responses', async (action) => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: { ...metadata, apiBaseUrl: 'https://private.example/v1', apiKey: 'secret-value', apiKeyPreview: '••••7359', extra: { password: 'do-not-propagate' } } }));
+    vi.stubGlobal('fetch', fetch);
+    const result = action === 'get' ? await getProviderSettings('https://gateway.test', 'token') : await saveProviderSettings('https://gateway.test', 'token', metadata);
+    expect(result).toEqual(metadata);
+    for (const value of ['private.example', 'secret-value', '7359', 'do-not-propagate']) expect(JSON.stringify(result)).not.toContain(value);
+  });
+  it('converts a legacy URL into only a configured flag, never a displayed URL', async () => {
+    const { apiBaseUrlSet: _flag, ...legacy } = metadata;
+    void _flag;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ provider: { ...legacy, apiBaseUrl: 'https://old-private.example/v1', apiKeyPreview: '••••1234' } })));
+    expect(await getProviderSettings('https://gateway.test', 'token')).toEqual(metadata);
+  });
+  it('rejects malformed summaries without including remote data in the error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ provider: { ...metadata, apiMode: 'secret-provider-url-key' } })));
+    await expect(getProviderSettings('https://gateway.test', 'token')).rejects.toMatchObject({ code: 'invalid_provider_response', message: '模型服务状态格式不正确，请更新网关。' });
   });
 });

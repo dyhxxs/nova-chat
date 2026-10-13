@@ -1,3 +1,5 @@
+import { CompanionAvatar } from './CompanionAvatar';
+import { KnowledgeSources } from './KnowledgeSources';
 import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Image, Linking, Platform, Pressable, StyleSheet, View, type ImageStyle, type TextStyle } from 'react-native';
 import { ThemedText as Text } from './ThemedText';
@@ -14,11 +16,20 @@ import { TypingDots } from './TypingDots';
 import { UserAvatar } from './UserAvatar';
 
 type Props = {
+  companion?: boolean;
+  companionName?: string;
+  companionFace?: string | null;
   message: AppMessage;
   serverUrl?: string;
   accessToken?: string;
   user?: UserProfile;
+  onFork?: () => void;
+  onRewrite?: () => void;
   onRetry?: () => void;
+  onEditRequest?: () => void;
+  onReadAloud?: () => void;
+  onToggleStarred?: () => void;
+  readingAloud?: boolean;
 };
 
 const DEFAULT_IMAGE_ASPECT_RATIO = 4 / 3;
@@ -332,10 +343,12 @@ function AttachmentGallery({ attachments, serverUrl, accessToken, user }: {
   );
 }
 
-export const MessageBubble = memo(function MessageBubble({ message, serverUrl, accessToken, user, onRetry }: Props) {
+export const MessageBubble = memo(function MessageBubble({ companion, companionName, companionFace, message, serverUrl, accessToken, user, onRetry, onEditRequest, onReadAloud, onToggleStarred, readingAloud, onFork, onRewrite }: Props) {
   const theme = useAppTheme();
   const [copied, setCopied] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const canRetry = message.status !== 'error' || message.retryable !== false;
+  const editLabel = message.errorCode === 'provider_content_rejected' || message.errorCode === 'provider_image_request_rejected' || /图片服务.*(?:描述|照片请求)/.test(message.errorMessage ?? '') ? '修改照片描述' : '修改提问';
   const modelLabel = message.role === 'assistant' ? assistantModelLabel(message) : undefined;
   const messageDetails = useMemo(() => assistantMessageDetails(message), [message]);
   const copy = async () => {
@@ -345,6 +358,25 @@ export const MessageBubble = memo(function MessageBubble({ message, serverUrl, a
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+
+  if (companion) {
+    const mine = message.role === 'user';
+    return <View style={{ alignItems: mine ? 'flex-end' : 'flex-start', marginVertical: 10 }}>
+      <View style={{ flexDirection: 'row', gap: 10, maxWidth: '94%', alignItems: 'flex-start' }}>
+        {!mine && <CompanionAvatar name={companionName || 'TA'} fileId={companionFace} serverUrl={serverUrl || ''} accessToken={accessToken || ''} size={34} />}
+        <Pressable onLongPress={() => void copy()} style={{ flexShrink: 1, minWidth: 48, padding: 13, borderRadius: 17, borderTopLeftRadius: mine ? 17 : 4, borderTopRightRadius: mine ? 4 : 17, backgroundColor: mine ? theme.colors.userBubble : theme.colors.surface }}>
+          <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user={mine} />
+          {!!message.content && (mine
+            ? <Text selectable style={{ color: '#FFFFFF', fontSize: 16, lineHeight: 25 }}>{message.content}</Text>
+            : <AssistantMarkdown content={message.content} />)}
+          {!message.content && message.status === 'streaming' && <TypingDots />}
+          {message.status === 'error' && <View style={{ gap: 10 }}><Text style={{ color: theme.colors.danger, fontSize: 13, lineHeight: 20 }}>{message.errorMessage || '消息暂时没有送达。'}</Text>{canRetry && onRetry && <Pressable accessibilityRole="button" accessibilityLabel="重试陪伴回复" onPress={onRetry} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: theme.colors.primary }}>点按重试</Text></Pressable>}{!canRetry && onEditRequest && <Pressable accessibilityRole="button" accessibilityLabel={editLabel} onPress={onEditRequest} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: theme.colors.primary }}>{editLabel}</Text></Pressable>}</View>}
+          {message.status === 'cancelled' && <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>已停止回复</Text>}
+        </Pressable>
+      </View>
+      <Text style={{ color: theme.colors.textTertiary, fontSize: 10, marginTop: 6, marginHorizontal: mine ? 4 : 46 }}>{message.status === 'streaming' ? '正在回复…' : new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+    </View>;
+  }
 
   if (message.role === 'user') {
     return (
@@ -356,16 +388,18 @@ export const MessageBubble = memo(function MessageBubble({ message, serverUrl, a
           </Pressable>
           <UserAvatar user={user} serverUrl={serverUrl} accessToken={accessToken} size={30} />
         </View>
+        {message.status === 'complete' && !!message.content.trim() && !message.attachments.length && onRewrite && <Pressable accessibilityRole="button" accessibilityLabel="在新分支改写这条提问" onPress={onRewrite} style={[styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border, marginTop: 6, minHeight: 44 }]}><Ionicons name="create-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>改写提问</Text></Pressable>}
       </View>
     );
   }
 
   return (
     <View style={styles.assistantRow}>
-      <View style={[styles.avatar, { backgroundColor: theme.colors.primarySoft }]}><Ionicons name="sparkles" size={16} color={theme.colors.primary} /></View>
+      <View style={[styles.avatar, { backgroundColor: theme.colors.primarySoft }]}><Ionicons name="chatbubble-outline" size={16} color={theme.colors.primary} /></View>
       <View style={styles.assistantBody}>
         <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user={false} />
         {!message.content && message.status === 'streaming' ? <TypingDots /> : !!message.content && <AssistantMarkdown content={message.content} />}
+        {message.knowledge && <KnowledgeSources result={message.knowledge} />}
         {message.status === 'error' && (
           <View style={[styles.errorBox, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]}>
             <Ionicons name="alert-circle-outline" size={18} color={theme.colors.danger} />
@@ -417,7 +451,23 @@ export const MessageBubble = memo(function MessageBubble({ message, serverUrl, a
                 <Text style={[styles.actionText, { color: copied ? theme.colors.success : theme.colors.textSecondary, fontFamily: theme.fonts.medium }]}>{copied ? '已复制' : '复制'}</Text>
               </Pressable>
             )}
-            {(['error', 'complete', 'cancelled'] as const).includes(message.status as 'error' | 'complete' | 'cancelled') && onRetry && (
+            {message.status === 'complete' && (!!message.content.trim() || !!message.attachments.length) && onFork && <Pressable accessibilityRole="button" accessibilityLabel="从这条回复创建分支" onPress={onFork} style={[styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border, minHeight: 44 }]}><Ionicons name="git-branch-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>创建分支</Text></Pressable>}
+            {message.status === 'complete' && (!!message.content.trim() || !!message.attachments.length) && onToggleStarred && (
+              <Pressable accessibilityRole="button" accessibilityLabel={message.starred ? '取消收藏这条回复' : '收藏这条回复'} onPress={() => { onToggleStarred(); void Haptics.selectionAsync(); }}
+                style={({ pressed }) => [styles.actionButton, { backgroundColor: message.starred ? theme.colors.primarySoft : theme.colors.surfaceMuted, borderColor: message.starred ? theme.colors.primary : theme.colors.border }, pressed && { opacity: 0.65 }] }>
+                <Ionicons name={message.starred ? 'bookmark' : 'bookmark-outline'} size={15} color={message.starred ? theme.colors.primary : theme.colors.textSecondary} />
+                <Text style={[styles.actionText, { color: message.starred ? theme.colors.primary : theme.colors.textSecondary, fontFamily: theme.fonts.medium }]}>{message.starred ? '已收藏' : '收藏'}</Text>
+              </Pressable>
+            )}
+            {message.status === 'complete' && !!message.content.trim() && onReadAloud && (
+              <Pressable accessibilityRole="button" accessibilityLabel={readingAloud ? '停止朗读这条回复' : '朗读这条回复'} onPress={onReadAloud}
+                style={({ pressed }) => [styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }, pressed && { opacity: 0.65 }]}>
+                <Ionicons name={readingAloud ? 'stop-circle-outline' : 'volume-high-outline'} size={15} color={theme.colors.textSecondary} />
+                <Text style={[styles.actionText, { color: theme.colors.textSecondary, fontFamily: theme.fonts.medium }]}>{readingAloud ? '停止朗读' : '朗读'}</Text>
+              </Pressable>
+            )}
+            {message.status === 'error' && !canRetry && onEditRequest && <Pressable accessibilityRole="button" accessibilityLabel={editLabel} onPress={onEditRequest} style={[styles.actionButton, { minHeight: 44, backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]}><Ionicons name="create-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>{editLabel}</Text></Pressable>}
+            {(['error', 'complete', 'cancelled'] as const).includes(message.status as 'error' | 'complete' | 'cancelled') && canRetry && onRetry && (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="重新生成"
