@@ -4,10 +4,11 @@ on:
   pull_request:
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Pin the runner image so CI does not change under us during the Ubuntu 26 migration.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           # The gateway uses node:sqlite with SQLite FTS5. Node 24 is the
           # first supported runtime in this project that ships that module
