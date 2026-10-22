@@ -9,7 +9,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.13.0
+          # The gateway uses node:sqlite with SQLite FTS5. Node 24 is the
+          # first supported runtime in this project that ships that module
+          # in the official GitHub runner build.
+          node-version: 24.22.1
           cache: npm
       - run: npm ci
       - run: npm run security:audit:gateway
@@ -34,7 +37,12 @@ jobs:
           exit 1
       - name: Stop the production gateway
         if: always()
-        run: docker compose down -v
+        run: |
+          if [ -f services/gateway/.env ]; then
+            docker compose down -v
+          else
+            echo "Gateway was not started; no environment file to clean up."
+          fi
       - run: npx expo export --platform android --output-dir dist/android-bundle --clear
         working-directory: apps/mobile
       - run: npx expo export --platform ios --output-dir dist/ios-bundle --clear

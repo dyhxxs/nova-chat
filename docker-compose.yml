@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: services/gateway/Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        NODE_IMAGE: ${NODE_IMAGE:-node:24-alpine}
     env_file:
       - services/gateway/.env
     environment:
