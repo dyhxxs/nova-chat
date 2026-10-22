@@ -70,11 +70,11 @@
 
 Android 已完成 MuMu 安装与实际聊天、照片验证。项目包含 iOS / Web 客户端代码；iOS 原生安装与完整真机覆盖仍需继续验证。
 
-本次发布的是源码更新。当前公网 1.1.31 安装包可从[下载页](https://134.175.139.81/download/)获取：大多数手机推荐 [ARM64 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk)，需要多架构兼容时使用[通用 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk)。文件大小和 SHA-256 见 [1.1.31 更新说明](docs/RELEASE_1.1.31.md)；GitHub Releases 中的版本与说明仍以实际发布内容为准。
+本次发布的是源码更新。当前公网 1.1.31 安装包可从[下载页](https://134.175.139.81/download/)获取：大多数手机推荐 [ARM64 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk)，需要多架构兼容时使用[通用 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk)。文件大小和 SHA-256 见 [1.1.31 更新说明](docs/RELEASE_1.1.31.md)，也可以直接查看 [GitHub Release v1.1.31](https://github.com/dyhxxs/nova-chat/releases/tag/v1.1.31)。
 
 ## 五分钟开始
 
-需要 **Node.js 22.13+** 与 npm。移动端开发使用 Expo，生产网关可以使用 Docker Compose。
+需要 **Node.js 24+** 与 npm。网关使用 Node 内置 SQLite 的 FTS5 知识库检索；移动端开发使用 Expo，生产网关可以使用 Docker Compose。
 
 ~~~bash
 git clone https://github.com/dyhxxs/nova-chat.git

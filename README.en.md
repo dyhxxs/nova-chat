@@ -50,11 +50,11 @@ Administrators can configure regular chat, companion chat and companion images s
 
 Source version: **1.1.31 / Android versionCode 33**. This release includes voice messages, companion conversations, personal knowledge, account security, backup and chat branching, plus gateway probes, request correlation, login protection, graceful draining, administrator audit logs and optional Prometheus metrics. Android installation, real companion conversations and character photos have been checked in MuMu. iOS and Web client code is included; native iOS installation and broader physical-device coverage still need verification.
 
-This update publishes source code. The current public 1.1.31 Android builds are available from the [download page](https://134.175.139.81/download/): use the [ARM64 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk) for most phones or the [universal APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk) for multi-ABI compatibility. See the [1.1.31 notes](docs/RELEASE_1.1.31.md) for sizes and SHA-256 values; GitHub Releases still reflects whatever versions and binaries have actually been published there.
+This update publishes source code. The current public 1.1.31 Android builds are available from the [download page](https://134.175.139.81/download/): use the [ARM64 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk) for most phones or the [universal APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk) for multi-ABI compatibility. See the [1.1.31 notes](docs/RELEASE_1.1.31.md) for sizes and SHA-256 values, or open the [GitHub Release v1.1.31](https://github.com/dyhxxs/nova-chat/releases/tag/v1.1.31).
 
 ## Get started
 
-Use **Node.js 22.13+** and npm.
+Use **Node.js 24+** and npm. The gateway uses Node's built-in SQLite with FTS5 for knowledge retrieval; mobile development uses Expo and production deployments can use Docker Compose.
 
 ~~~bash
 git clone https://github.com/dyhxxs/nova-chat.git
