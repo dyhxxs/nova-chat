@@ -1,3 +1,4 @@
+import { voiceMessageSchema, voicePreferencesSchema } from './voice';
 import { knowledgeDraftSchema } from './knowledgeDraft';
 import { z } from 'zod';
 import { generatedAttachmentSchema, generationOptionsSchema, knowledgeResultSchema } from '@nova-chat/protocol';
@@ -6,17 +7,20 @@ import { assistantPresetSchema } from './assistantPresets';
 
 const date = z.number().finite().nonnegative();
 const messageSchema = z.object({
+  voice: voiceMessageSchema.optional(),
   id: z.string().min(1), role: z.enum(['user', 'assistant']), content: z.string(),
   attachments: z.array(generatedAttachmentSchema).default([]),
   createdAt: date, status: z.enum(['complete', 'streaming', 'error', 'cancelled']),
   errorMessage: z.string().optional(), errorCode: z.string().max(120).optional(), retryable: z.boolean().optional(),
   knowledge: knowledgeResultSchema.optional(),
   usage: z.object({ inputTokens: z.number().optional(), outputTokens: z.number().optional(), totalTokens: z.number().optional() }).optional(),
-  requestedModel: z.string().optional(), model: z.string().optional(), generationRequestId: z.string().optional(),
+  requestedModel: z.string().optional(), model: z.string().optional(), generationRequestId: z.string().optional(), sourceEventId: z.string().uuid().optional(),
   generationOptions: generationOptionsSchema.omit({ model: true, instructions: true }).optional(),
   generationStartedAt: date.optional(), completedAt: date.optional(), starred: z.boolean().optional(),
 });
 const conversationSchema = z.object({
+  voicePreferences: voicePreferencesSchema.optional(),
+  unreadCount: z.number().int().min(0).max(999).optional(),
   id: z.string().min(1), title: z.string(), createdAt: date, updatedAt: date,
   pinned: z.boolean().optional(), archived: z.boolean().optional(), importSourceId: z.string().optional(),
   draft: z.string().max(10_000).optional(),

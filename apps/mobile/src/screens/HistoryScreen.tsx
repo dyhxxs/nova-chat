@@ -6,6 +6,7 @@ import { ThemedText as Text } from '../components/ThemedText';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
+import { IconButton } from '../components/IconButton';
 import { KeyboardAwareView } from '../components/KeyboardAwareView';
 import { useAppTheme } from '../hooks/useAppTheme';
 import { conversationPreview, createConversationSelector, type HistoryFilter } from '../lib/conversationHistory';
@@ -14,7 +15,7 @@ import { shareTextFile } from '../services/backupFiles';
 import { useAppStore } from '../store/useAppStore';
 import type { Conversation, RootStackParamList } from '../types';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'History'>;
+type Props = NativeStackScreenProps<RootStackParamList, 'History' | 'CompanionConversations'>;
 
 function formatDate(timestamp: number): string {
   const date = new Date(timestamp);
@@ -28,7 +29,10 @@ function formatDate(timestamp: number): string {
   return date.toLocaleDateString('zh-CN', options);
 }
 
-export function HistoryScreen({ navigation }: Props) {
+export function HistoryScreen({ navigation, route }: Props) {
+  const companion = route?.name === 'CompanionConversations' ? route.params as RootStackParamList['CompanionConversations'] : undefined;
+  const companionId = companion?.companionId;
+  const companionName = companion?.companionName ?? 'TA';
   const theme = useAppTheme();
   const [query, setQuery] = useState('');
   const deferredQuery = useDeferredValue(query);
@@ -40,11 +44,23 @@ export function HistoryScreen({ navigation }: Props) {
   const [menuConversationId, setMenuConversationId] = useState<string>();
   const [renameConversationId, setRenameConversationId] = useState<string>();
   const [renameValue, setRenameValue] = useState('');
-  const conversations = useAppStore((state) => state.conversations);
+  const allConversations = useAppStore((state) => state.conversations);
+  const conversations = useMemo(() => allConversations.filter(item => companionId
+    ? item.kind === 'companion' && item.companionId === companionId
+    : item.kind !== 'companion'), [allConversations, companionId]);
+  useEffect(() => {
+    if (!companionId) return;
+    navigation.setOptions({
+      title: `${companionName}的对话`,
+      headerLeft: () => <IconButton name="chevron-back" accessibilityLabel="返回人设列表" onPress={() => navigation.popTo('Companions')} />,
+      headerRight: () => <IconButton name="person-outline" accessibilityLabel="编辑人设" onPress={() => navigation.popTo('Companions', { editId: companionId })} />,
+    });
+  }, [companionId, companionName, navigation]);
   const activeId = useAppStore((state) => state.activeConversationId);
   const setActive = useAppStore((state) => state.setActiveConversation);
   const remove = useAppStore((state) => state.deleteConversation);
   const createNew = useAppStore((state) => state.newConversation);
+  const createCompanionChat = useAppStore((state) => state.newCompanionConversation);
   const rename = useAppStore((state) => state.renameConversation);
   const togglePinned = useAppStore((state) => state.toggleConversationPinned);
   const toggleArchived = useAppStore((state) => state.toggleConversationArchived);
@@ -105,6 +121,10 @@ export function HistoryScreen({ navigation }: Props) {
 
   return (
     <KeyboardAwareView style={[styles.container, { backgroundColor: theme.colors.background }]}>
+      {companionId && <View style={{ padding: 20, gap: 8 }}>
+        <Text style={{ color: theme.colors.text, fontSize: 21, fontWeight: '600' }}>{companionName}</Text>
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 13, lineHeight: 20 }}>每个对话可以聊不同的内容，聊天上下文互相独立。</Text>
+      </View>}
       <View style={styles.utilityRow}>
         <Text style={[styles.utilityHint, { color: theme.colors.textSecondary }]}>{conversations.reduce((count, item) => count + item.messages.filter((message) => message.role === 'assistant' && message.starred).length, 0)} 条收藏回答</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="打开收藏夹" onPress={() => navigation.navigate('Saved')} style={({ pressed }) => [styles.savedLink, { backgroundColor: theme.colors.primarySoft }, pressed && styles.pressed]}>
@@ -148,7 +168,7 @@ export function HistoryScreen({ navigation }: Props) {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="新建对话"
-          onPress={() => { createNew(); navigation.popTo('Chat'); void Haptics.selectionAsync(); }}
+          onPress={() => { if (companionId) createCompanionChat(companionId, companionName); else createNew(); navigation.popTo('Chat'); void Haptics.selectionAsync(); }}
           style={({ pressed }) => [styles.newButton, { backgroundColor: theme.colors.primary }, pressed && styles.pressed]}
         >
           <Ionicons name="add" size={19} color="#FFFFFF" />
@@ -166,8 +186,8 @@ export function HistoryScreen({ navigation }: Props) {
             <View style={[styles.emptyIcon, { backgroundColor: theme.colors.surfaceMuted }]}>
               <Ionicons name="chatbubbles-outline" size={25} color={theme.colors.textTertiary} />
             </View>
-            <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>没有找到相关对话</Text>
-            <Text style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}>切换筛选或换个关键词试试。搜索同时匹配正文、模型和附件名称。</Text>
+            <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>{companionId && !query.trim() && filter === 'active' ? `和${companionName}开始第一个话题` : '没有找到相关对话'}</Text>
+            <Text style={[styles.emptySubtitle, { color: theme.colors.textSecondary }]}>{companionId && !query.trim() && filter === 'active' ? '点“新对话”开始聊天。之后可以再建对话，聊另一件事。' : '切换筛选或换个关键词试试。搜索同时匹配正文、模型和附件名称。'}</Text>
           </View>
         )}
         renderItem={({ item }) => {
@@ -196,6 +216,7 @@ export function HistoryScreen({ navigation }: Props) {
                   {!!item.pinned && <Ionicons name="pin" size={13} color={theme.colors.primary} />}
                   {!!item.archived && <Ionicons name="archive-outline" size={13} color={theme.colors.textTertiary} />}
                   {isActive && <Text style={[styles.activeBadge, { color: theme.colors.primary, backgroundColor: theme.colors.surfaceElevated }]}>当前</Text>}
+                  {!!item.unreadCount && <Text accessibilityLabel={`${item.unreadCount} 条未读消息`} style={styles.unreadBadge}>{item.unreadCount > 99 ? '99+' : item.unreadCount}</Text>}
                 </View>
                 <Text numberOfLines={2} style={[styles.preview, { color: theme.colors.textSecondary }]}>{item.draft?.trim() ? `草稿：${item.draft}` : conversationPreview(item)}</Text>
                 <View style={styles.rowStats}>
@@ -329,6 +350,7 @@ const styles = StyleSheet.create({
   titleLine: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   title: { flexShrink: 1, fontSize: 15, fontWeight: '700' },
   activeBadge: { overflow: 'hidden', borderRadius: 7, paddingHorizontal: 6, paddingVertical: 2, fontSize: 9, fontWeight: '800' },
+  unreadBadge: { minWidth: 20, height: 20, borderRadius: 10, paddingHorizontal: 5, textAlign: 'center', lineHeight: 20, backgroundColor: '#E5484D', color: '#FFFFFF', fontSize: 10, fontWeight: '800' },
   preview: { fontSize: 12, lineHeight: 17, marginTop: 5 },
   rowStats: { flexDirection: 'row', alignItems: 'center', gap: 9, marginTop: 6 },
   statText: { fontSize: 10 },

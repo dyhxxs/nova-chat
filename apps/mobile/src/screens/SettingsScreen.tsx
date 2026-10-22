@@ -1,3 +1,4 @@
+import { enableCompanionNotifications, useCompanionNotificationStatus } from '../hooks/useCompanionNotifications';
 import { useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, View } from 'react-native';
 import { ThemedTextInput as TextInput } from '../components/ThemedText';
@@ -34,6 +35,7 @@ function Chip<T extends string>({ value, selected, label, onPress }: { value: T;
 
 export function SettingsScreen({ navigation }: Props) {
   const theme = useAppTheme();
+  const notificationStatus = useCompanionNotificationStatus();
   const settings = useAppStore((state) => state.settings);
   const update = useAppStore((state) => state.updateSettings);
   const user = useAppStore((state) => state.user);
@@ -132,6 +134,12 @@ export function SettingsScreen({ navigation }: Props) {
             <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>查询会把必要的城市、搜索词或网址发送到公开数据服务；关闭后不使用网关内置工具。上游搜索/代码是独立开关，是否可用由模型服务商决定。</Text>
             <Text style={[styles.hint, { color: theme.colors.textSecondary }]}>天气为模型预报；汇率为带日期的参考价；免费搜索可能不可用。查询失败会说明，不会伪造结果。</Text>
           </View>
+        </SettingsSection>
+
+        <SettingsSection title="消息提醒">
+          <SettingsLink icon="notifications-outline" title={notificationStatus.busy ? '正在开启消息提醒…' : '陪伴消息通知'}
+            subtitle={notificationStatus.pushReady ? '收到 TA 的消息后提醒，点按直接进入对话' : notificationStatus.granted ? '应用打开时可提醒，应用关闭后的即时推送尚未启用' : '开启后显示角色名字与消息预览，点按进入对话'}
+            onPress={() => { if (!notificationStatus.busy) void enableCompanionNotifications(); }} />
         </SettingsSection>
 
         <SettingsSection title="数据与帮助"><SettingsLink icon="bookmark-outline" title="收藏夹" subtitle="保存重要回答，快速回到原对话" onPress={() => navigation.navigate('Saved')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="library-outline" title="个人资料库" subtitle="长期资料、中文检索与原文引用" onPress={() => navigation.navigate('Knowledge')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="pulse-outline" title="连接诊断" subtitle="无模型调用的连接检查与脱敏报告" onPress={() => navigation.navigate('Diagnostics')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="sparkles-outline" title="助手库" subtitle="自定义角色、可复用指令和开场草稿" onPress={() => navigation.navigate('Assistants')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="heart-outline" title="AI 陪伴" subtitle="日常聊天、角色性格与专属长相" onPress={() => navigation.navigate('Companions')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="folder-open-outline" title="数据与备份" subtitle="迁移对话与助手，查看存储及恢复副本" onPress={() => navigation.navigate('Data')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="information-circle-outline" title="关于 Nova" subtitle="安全架构、版本和功能边界" onPress={() => navigation.navigate('About')} /><View style={[styles.divider, { backgroundColor: theme.colors.border, marginHorizontal: 14 }]} /><SettingsLink icon="trash-outline" title="清空本地对话" subtitle="不会删除服务器账户" danger onPress={clear} /></SettingsSection>

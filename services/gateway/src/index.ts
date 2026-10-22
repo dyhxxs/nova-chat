@@ -6,6 +6,7 @@ async function main() {
   const config = loadConfig();
   const app = await buildServer(config);
   const shutdown = async (signal: string) => {
+    app.beginDrain();
     app.log.info({ signal }, 'shutting down');
     await app.close();
     process.exit(0);

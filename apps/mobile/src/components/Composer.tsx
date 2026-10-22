@@ -1,5 +1,8 @@
+import { VoiceRecorder } from './VoiceRecorder';
+import { VoicePreferencesPanel } from './VoicePreferencesPanel';
+import type { RecordedVoice, VoicePreferences } from '../lib/voice';
 import { useCallback, useRef, useState, type ComponentProps } from 'react';
-import { ActivityIndicator, Image, Keyboard, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Keyboard, ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { ThemedText as Text } from './ThemedText';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -9,6 +12,14 @@ import type { AttachmentUploadState, PendingAttachment } from '../types';
 type IoniconName = ComponentProps<typeof Ionicons>['name'];
 
 type Props = {
+  voiceActive: boolean;
+  voiceConversationId: string;
+  serverUrl: string;
+  accessToken: string;
+  voicePreferences?: VoicePreferences;
+  onVoicePreferences: (preferences: VoicePreferences) => void;
+  onRecordStart: () => void;
+  onRecorded: (recording: RecordedVoice, asText: boolean) => Promise<boolean>;
   companion?: boolean;
   companionName?: string;
   text: string;
@@ -48,6 +59,7 @@ function formatBytes(bytes?: number): string {
 }
 
 export function Composer({
+  voiceActive, voiceConversationId, serverUrl, accessToken, voicePreferences, onVoicePreferences, onRecordStart, onRecorded,
   companion = false, companionName,
   text, onChangeText, onSentDraft,
   generating,
@@ -74,6 +86,7 @@ export function Composer({
   onInputContentSizeChange,
 }: Props) {
   const theme = useAppTheme();
+  const [voiceMode, setVoiceMode] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [attachmentTrayOpen, setAttachmentTrayOpen] = useState(false);
@@ -81,7 +94,7 @@ export function Composer({
   const submittingRef = useRef(false);
   const busy = uploading || submitting;
   const hasContent = text.trim().length > 0 || attachments.length > 0;
-  const canSend = hasContent && !busy && !generating;
+  const canSend = hasContent && !busy;
   const attachmentsFull = attachments.length >= 8;
 
   const submit = useCallback(async () => {
@@ -93,7 +106,7 @@ export function Composer({
       if (sent) {
         onSentDraft(text);
         setAttachmentTrayOpen(false);
-        Keyboard.dismiss();
+        // Preserve focus so a cleared draft can immediately become the next message.
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       }
     } finally {
@@ -286,6 +299,7 @@ export function Composer({
             {!companion && trayItem('文件', '从设备选择', 'document-text-outline', onAddDocument)}
             {companion && trayItem('看你的照片', '发一张近照', 'person-outline', () => { void onSend('你在干嘛？发张你的照片给我看看。'); })}
           </View>
+          <VoicePreferencesPanel preferences={voicePreferences} serverUrl={serverUrl} accessToken={accessToken} onChange={onVoicePreferences} />
           <Text style={[styles.trayHint, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>最多 8 个附件，单个不超过 25 MB。</Text>
         </View>
       )}
@@ -302,15 +316,20 @@ export function Composer({
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="拍照"
-          disabled={busy || attachmentsFull}
-          onPress={() => chooseAttachment(onTakePhoto)}
+          accessibilityLabel={voiceMode ? '切换键盘输入' : '切换语音输入'}
+          disabled={busy}
+          onPress={() => { Keyboard.dismiss(); setVoiceMode(value => !value); }}
           hitSlop={5}
           style={({ pressed }) => [styles.roundAction, busy && styles.disabled, pressed && styles.pressed]}
         >
-          <Ionicons name="camera-outline" size={22} color={busy || attachmentsFull ? theme.colors.textTertiary : theme.colors.textSecondary} />
+          <Ionicons name={voiceMode ? "keypad-outline" : "mic-outline"} size={22} color={busy || attachmentsFull ? theme.colors.textTertiary : theme.colors.textSecondary} />
         </Pressable>
-        <TextInput
+        {<View style={{ flex: 1, display: voiceMode ? 'flex' : 'none' }}><VoiceRecorder key={voiceConversationId + ':' + serverUrl} active={voiceActive && voiceMode} disabled={busy || generating || attachments.length > 0} onRecordStart={onRecordStart} onRecorded={async (recording, asText) => {
+          const accepted = await onRecorded(recording, asText);
+          if (accepted && asText) setTimeout(() => setVoiceMode(false), 0);
+          return accepted;
+        }} /></View>}
+        {!voiceMode && <TextInput
           ref={inputRef}
           value={text}
           onChangeText={onChangeText}
@@ -319,7 +338,7 @@ export function Composer({
           style={[styles.input, { color: theme.colors.text, fontFamily: theme.fonts.regular }]}
           multiline
           maxLength={10_000}
-          editable={!busy}
+          editable
           textAlignVertical="center"
           accessibilityLabel="消息输入框"
           onFocus={onInputFocus}
@@ -328,8 +347,8 @@ export function Composer({
           enterKeyHint="send"
           submitBehavior="submit"
           onSubmitEditing={() => { void submit(); }}
-        />
-        {generating && (
+        />}
+        {generating && !companion && (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="停止生成"
@@ -349,7 +368,7 @@ export function Composer({
         >
           <Ionicons name={attachmentTrayOpen ? 'close' : 'add'} size={25} color={theme.colors.textSecondary} />
         </Pressable>
-        {(canSend || busy) && (
+        {!voiceMode && (canSend || busy) && (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={busy ? '正在发送' : '发送消息'}

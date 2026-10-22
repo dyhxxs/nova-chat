@@ -1,0 +1,163 @@
+{
+  "checkedAt": "2026-10-21T10:16:22.994Z",
+  "baseUrl": "https://134.175.139.81",
+  "release": "1.1.31",
+  "versionCode": 33,
+  "packages": {
+    "arm64": {
+      "fileName": "NovaChat-1.1.31-android-arm64.apk",
+      "url": "https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk",
+      "expectedSha256": "691D21A9DAE81B8BA7C5ECF3B0339E397A17D5BEB0CB6B278D6EF6D583E1AD00",
+      "head": {
+        "status": 200,
+        "headers": {
+          "content-length": "42909649",
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": "attachment; filename=\"NovaChat-1.1.31-android-arm64.apk\"",
+          "accept-ranges": "bytes",
+          "cache-control": "public, max-age=31536000, immutable",
+          "x-content-type-options": "nosniff"
+        }
+      },
+      "range": {
+        "status": 206,
+        "headers": {
+          "content-length": "128",
+          "content-range": "bytes 0-127/42909649",
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": "attachment; filename=\"NovaChat-1.1.31-android-arm64.apk\"",
+          "cache-control": "public, max-age=31536000, immutable",
+          "x-content-type-options": "nosniff"
+        },
+        "bytes": 128
+      },
+      "fullDownload": {
+        "status": 200,
+        "headers": {
+          "content-length": "42909649",
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": "attachment; filename=\"NovaChat-1.1.31-android-arm64.apk\"",
+          "accept-ranges": "bytes",
+          "cache-control": "public, max-age=31536000, immutable",
+          "x-content-type-options": "nosniff"
+        },
+        "bytes": 42909649,
+        "sha256": "691D21A9DAE81B8BA7C5ECF3B0339E397A17D5BEB0CB6B278D6EF6D583E1AD00"
+      },
+      "matchesExpected": true
+    },
+    "universal": {
+      "fileName": "NovaChat-1.1.31-android-universal.apk",
+      "url": "https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk",
+      "expectedSha256": "FCD6A6044DDBD938DCC50543C303C6632F565BFF77DFC4C781717E86E5E96D35",
+      "head": {
+        "status": 200,
+        "headers": {
+          "content-length": "102014370",
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": "attachment; filename=\"NovaChat-1.1.31-android-universal.apk\"",
+          "accept-ranges": "bytes",
+          "cache-control": "public, max-age=31536000, immutable",
+          "x-content-type-options": "nosniff"
+        }
+      },
+      "range": {
+        "status": 206,
+        "headers": {
+          "content-length": "128",
+          "content-range": "bytes 0-127/102014370",
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": "attachment; filename=\"NovaChat-1.1.31-android-universal.apk\"",
+          "cache-control": "public, max-age=31536000, immutable",
+          "x-content-type-options": "nosniff"
+        },
+        "bytes": 128
+      },
+      "fullDownload": {
+        "status": 200,
+        "headers": {
+          "content-length": "102014370",
+          "content-type": "application/vnd.android.package-archive",
+          "content-disposition": "attachment; filename=\"NovaChat-1.1.31-android-universal.apk\"",
+          "accept-ranges": "bytes",
+          "cache-control": "public, max-age=31536000, immutable",
+          "x-content-type-options": "nosniff"
+        },
+        "bytes": 102014370,
+        "sha256": "FCD6A6044DDBD938DCC50543C303C6632F565BFF77DFC4C781717E86E5E96D35"
+      },
+      "matchesExpected": true
+    }
+  },
+  "endpoints": {
+    "/healthz": {
+      "status": 200,
+      "headers": {
+        "content-length": "58",
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "ok": true,
+        "service": "nova-chat-gateway",
+        "status": "alive"
+      }
+    },
+    "/readyz": {
+      "status": 200,
+      "headers": {
+        "content-length": "92",
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "ok": true,
+        "service": "nova-chat-gateway",
+        "checks": {
+          "database": "ok",
+          "provider": "configured"
+        }
+      }
+    },
+    "/v1/app/update": {
+      "status": 200,
+      "headers": {
+        "content-length": "246",
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff"
+      },
+      "body": {
+        "update": {
+          "minimumVersionCode": 33,
+          "latestVersion": "1.1.31",
+          "latestVersionCode": 33,
+          "downloadUrl": "https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk",
+          "message": "当前版本已停止维护，请更新到最新版后继续使用"
+        }
+      }
+    }
+  },
+  "localBuilds": {
+    "arm64": {
+      "path": "artifacts/server-test-1.1.31/NovaChat-1.1.31-android-arm64-server-test.apk",
+      "bytes": 42909649,
+      "sha256": "691D21A9DAE81B8BA7C5ECF3B0339E397A17D5BEB0CB6B278D6EF6D583E1AD00"
+    },
+    "universal": {
+      "path": "artifacts/server-test-1.1.31/NovaChat-1.1.31-android-universal-server-test.apk",
+      "bytes": 102014370,
+      "sha256": "FCD6A6044DDBD938DCC50543C303C6632F565BFF77DFC4C781717E86E5E96D35"
+    }
+  },
+  "downloadPage": {
+    "status": 200,
+    "containsArm64": true,
+    "containsUniversal": true,
+    "containsArm64Sha256": true,
+    "containsUniversalSha256": true
+  },
+  "ok": true
+}

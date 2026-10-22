@@ -1,3 +1,4 @@
+import { replyWantsVoice, voicePreferencesForConversation, type RecordedVoice, type VoiceMessage, type VoicePreferences } from '../lib/voice';
 import { ConversationForkError, createConversationFork, isForkSelectionCurrent, MAX_FORK_CONVERSATIONS, type ForkSelection } from '../lib/conversationFork';
 import { knowledgeDraftInputSchema, type KnowledgeDraft, type KnowledgeDraftInput } from '../lib/knowledgeDraft';
 import { retainedArchiveBytes, type ArchiveCleanupPlan, type StorageOverview } from '../lib/storageMaintenance';
@@ -9,7 +10,7 @@ import { credentialStorage } from '../services/credentialStorage';
 import { CredentialStorageError, type CredentialOperation } from '../lib/credentialVault';
 import { snapshotStorage } from '../services/snapshotStorage';
 import { create } from 'zustand';
-import { DEFAULT_MODEL_ID, type AttachmentRef, type GeneratedAttachment, type TokenUsage, type KnowledgeResult } from '@nova-chat/protocol';
+import { DEFAULT_MODEL_ID, type AttachmentRef, type CompanionEvent, type GeneratedAttachment, type TokenUsage, type KnowledgeResult } from '@nova-chat/protocol';
 import { normalizeServerUrl } from '../lib/connection';
 import { resolveStartupGateway } from '../lib/startupGateway';
 import { createId } from '../lib/id';
@@ -29,6 +30,19 @@ const ACCOUNT_STORAGE_PREFIX = '@nova-chat/account/v1/';
 const LEGACY_STORAGE_KEY = '@nova-chat/state/v1';
 const INTERIM_UNSCOPED_STORAGE_KEY = '@nova-chat/state/v2';
 const DEFAULT_GATEWAY_URL = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim() ?? '';
+
+function sameVoiceMessage(a: VoiceMessage | undefined, b: VoiceMessage): boolean {
+  return Boolean(a)
+    && a!.status === b.status
+    && a!.fileId === b.fileId
+    && a!.durationMs === b.durationMs
+    && a!.requestId === b.requestId
+    && a!.resumable === b.resumable
+    && a!.voiceId === b.voiceId
+    && a!.error === b.error
+    && a!.localRecording?.uri === b.localRecording?.uri
+    && a!.localRecording?.mimeType === b.localRecording?.mimeType;
+}
 
 const defaultSettings: AppSettings = {
   serverUrl: DEFAULT_GATEWAY_URL,
@@ -121,12 +135,19 @@ type AppState = {
   forkConversation: (selection: ForkSelection) => string;
   newConversation: () => string;
   newCompanionConversation: (companionId: string, companionName: string) => string;
+  updateCompanionName: (companionId: string, companionName: string) => void;
   setActiveConversation: (id: string) => void;
-  beginTurn: (content: string, attachments?: AttachmentRef[], targetConversationId?: string, requestedModel?: string) => { conversationId: string; assistantMessageId: string };
+  markConversationRead: (id: string) => void;
+  beginTurn: (content: string, attachments?: AttachmentRef[], targetConversationId?: string, requestedModel?: string, voice?: VoiceMessage) => { conversationId: string; assistantMessageId: string };
+  enqueueRecordedVoice: (conversationId: string, recording: RecordedVoice) => boolean;
+  completeRecordedVoice: (conversationId: string, messageId: string, text: string, voice: VoiceMessage) => { conversationId: string; assistantMessageId: string } | undefined;
+  setMessageVoice: (conversationId: string, messageId: string, voice: VoiceMessage) => void;
+  setVoicePreferences: (conversationId: string, preferences: VoicePreferences) => void;
   bindAssistantGeneration: (conversationId: string, messageId: string, generation: { requestId: string; options: NonNullable<AppMessage['generationOptions']>; startedAt?: number }) => boolean;
   appendAssistantDelta: (conversationId: string, messageId: string, delta: string, requestId?: string) => void;
   replaceAssistantContent: (conversationId: string, messageId: string, content: string, requestId?: string) => void;
-  completeAssistant: (conversationId: string, messageId: string, completion?: { requestId?: string; model?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[]; knowledge?: KnowledgeResult }) => void;
+  completeAssistant: (conversationId: string, messageId: string, completion?: { requestId?: string; model?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[]; segments?: string[]; knowledge?: KnowledgeResult }) => void;
+  appendCompanionEvent: (conversationId: string, event: CompanionEvent) => void;
   failAssistant: (conversationId: string, messageId: string, message: string, retryable: boolean, requestId?: string, errorCode?: string) => void;
   cancelAssistant: (conversationId: string, messageId: string, requestId?: string) => void;
   prepareRegeneration: (conversationId: string, messageId: string) => boolean;
@@ -542,27 +563,39 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   newCompanionConversation: (companionId, companionName) => {
-    const previous = get().conversations.filter(item => item.kind === 'companion' && item.companionId === companionId).sort((a, b) => b.updatedAt - a.updatedAt)[0];
-    if (previous) { set({ activeConversationId: previous.id, conversations: get().conversations.map(item => item.id === previous.id ? { ...item, companionName } : item) }); schedulePersistence(get(), true); return previous.id; }
     const conversation = freshConversation(Date.now(), { id: companionId, name: companionName });
     set((state) => ({ conversations: [conversation, ...state.conversations], activeConversationId: conversation.id }));
     schedulePersistence(get(), true);
     return conversation.id;
   },
 
+  updateCompanionName: (companionId, companionName) => {
+    set(state => ({ conversations: state.conversations.map(item => item.companionId === companionId ? { ...item, companionName } : item) }));
+    schedulePersistence(get(), true);
+  },
+
   setActiveConversation: (id) => {
     if (!get().conversations.some((item) => item.id === id)) return;
-    set({ activeConversationId: id });
+    set((state) => ({
+      activeConversationId: id,
+      conversations: state.conversations.map((item) => item.id === id && item.unreadCount ? { ...item, unreadCount: 0 } : item),
+    }));
     schedulePersistence(get());
   },
 
-  beginTurn: (content, attachments = [], targetConversationId, requestedModel) => {
+  markConversationRead: (id) => {
+    if (!get().conversations.some((item) => item.id === id && item.unreadCount)) return;
+    set((state) => ({ conversations: state.conversations.map((item) => item.id === id ? { ...item, unreadCount: 0 } : item) }));
+    schedulePersistence(get());
+  },
+
+  beginTurn: (content, attachments = [], targetConversationId, requestedModel, voice) => {
     const now = Date.now();
     const assistantMessageId = createId();
     let conversationId = targetConversationId ?? get().activeConversationId;
     if (!get().conversations.some((item) => item.id === conversationId)) conversationId = get().newConversation();
     const cleaned = content.trim();
-    const userMessage: AppMessage = { id: createId(), role: 'user', content: cleaned, attachments, createdAt: now, status: 'complete' };
+    const userMessage: AppMessage = { id: createId(), voice, role: 'user', content: cleaned, attachments, createdAt: now, status: 'complete' };
     const assistantMessage: AppMessage = {
       id: assistantMessageId,
       role: 'assistant',
@@ -585,6 +618,61 @@ export const useAppStore = create<AppState>((set, get) => ({
     return { conversationId, assistantMessageId };
   },
 
+  enqueueRecordedVoice: (conversationId, recording) => {
+    const conversation = get().conversations.find(item => item.id === conversationId);
+    if (!conversation) return false;
+    if (conversation.messages.some(message => message.voice?.requestId === recording.requestId)) return true;
+    const now = Date.now();
+    const message: AppMessage = {
+      id: createId(), role: 'user', content: '', attachments: [], createdAt: now, status: 'complete',
+      voice: { status: 'pending', requestId: recording.requestId, durationMs: recording.durationMs,
+        localRecording: { uri: recording.uri, mimeType: recording.mimeType } },
+    };
+    set(state => ({ conversations: state.conversations.map(item => item.id === conversationId ? {
+      ...item, archived: false, updatedAt: now,
+      title: item.messages.length ? item.title : '语音消息', messages: [...item.messages, message],
+    } : item).sort((a, b) => b.updatedAt - a.updatedAt) }));
+    schedulePersistence(get(), true);
+    return true;
+  },
+
+  completeRecordedVoice: (conversationId, messageId, text, voice) => {
+    const conversation = get().conversations.find(item => item.id === conversationId);
+    const user = conversation?.messages.find(message => message.id === messageId);
+    if (user?.role !== 'user' || !user.voice?.localRecording || user.voice.requestId !== voice.requestId || voice.status !== 'ready' || !text.trim()) return;
+    const now = Date.now(), assistantMessageId = createId();
+    const assistant: AppMessage = { id: assistantMessageId, role: 'assistant', content: '', attachments: [],
+      createdAt: now, status: 'streaming', requestedModel: get().settings.model.trim() || DEFAULT_MODEL_ID };
+    set(state => ({ conversations: state.conversations.map(item => item.id === conversationId ? {
+      ...item, updatedAt: now, title: item.title === '语音消息' ? titleFromMessage(text.trim()) : item.title,
+      messages: item.messages.flatMap(message => message.id === messageId ? [{ ...message, content: text.trim(), voice }, assistant] : [message]),
+    } : item) }));
+    schedulePersistence(get(), true);
+    return { conversationId, assistantMessageId };
+  },
+
+  setMessageVoice: (conversationId, messageId, voice) => {
+    let changed = false;
+    set(state => {
+      const conversations = state.conversations.map(item => {
+        if (item.id !== conversationId) return item;
+        let conversationChanged = false;
+        const messages = item.messages.map(message => {
+          if (message.id !== messageId || sameVoiceMessage(message.voice, voice)) return message;
+          changed = true;
+          conversationChanged = true;
+          return { ...message, voice };
+        });
+        return conversationChanged ? { ...item, messages } : item;
+      });
+      return changed ? { conversations } : state;
+    });
+    if (changed) schedulePersistence(get(), true);
+  },
+  setVoicePreferences: (conversationId, voicePreferences) => {
+    set(state => ({ conversations: state.conversations.map(item => item.id === conversationId ? { ...item, voicePreferences } : item) }));
+    schedulePersistence(get(), true);
+  },
   bindAssistantGeneration: (conversationId, messageId, generation) => {
     const requestId = generation.requestId.trim();
     if (!requestId) return false;
@@ -634,14 +722,51 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   completeAssistant: (conversationId, messageId, completion = {}) => {
     const model = completion.model?.trim() || undefined;
-    set((state) => ({ conversations: state.conversations.map((conversation) => conversation.id === conversationId ? {
-      ...conversation,
-      updatedAt: Date.now(),
-      messages: conversation.messages.map((message) => message.id === messageId && message.status === 'streaming'
-        && (!completion.requestId || message.generationRequestId === completion.requestId)
-        ? { ...message, status: 'complete', knowledge: completion.knowledge, usage: completion.usage, attachments: completion.attachments ?? [], model, completedAt: Date.now() }
-        : message),
-    } : conversation) }));
+    const parts = (completion.segments ?? []).map((segment) => segment.trim()).filter(Boolean);
+    const segments = parts.length <= 4 ? parts : [...parts.slice(0, 3), parts.slice(3).join('\n')];
+    set((state) => ({ conversations: state.conversations.map((conversation) => {
+      if (conversation.id !== conversationId) return conversation;
+      const nextMessages: AppMessage[] = [];
+      for (const message of conversation.messages) {
+        if (message.id !== messageId || message.status !== 'streaming' || (completion.requestId && message.generationRequestId !== completion.requestId)) {
+          nextMessages.push(message);
+          continue;
+        }
+        const content = segments[0] ?? message.content;
+        const attachments = completion.attachments ?? [];
+        // An intentional companion silence should not leave an empty assistant bubble.
+        if (conversation.companionId && !content.trim() && !attachments.length) continue;
+        const latestUser = nextMessages.filter(item => item.role === 'user').at(-1);
+        const preferences = voicePreferencesForConversation(Boolean(conversation.companionId), conversation.voicePreferences);
+        const wantsVoice = replyWantsVoice(preferences, latestUser?.voice, latestUser?.content);
+        const pendingVoice = () => ({ status: 'pending' as const, durationMs: 0, requestId: createId(), voiceId: preferences.voiceId });
+        nextMessages.push({ ...message, voice: wantsVoice && content.trim() ? pendingVoice() : undefined, content, status: 'complete', knowledge: completion.knowledge, usage: completion.usage, attachments, model, completedAt: Date.now() });
+        for (const segment of segments.slice(1)) {
+          nextMessages.push({ id: createId(), voice: wantsVoice ? pendingVoice() : undefined, role: 'assistant', content: segment, attachments: [], createdAt: Date.now(), status: 'complete', model, completedAt: Date.now() });
+        }
+      }
+      return { ...conversation, updatedAt: Date.now(), messages: nextMessages };
+    }) }));
+    schedulePersistence(get(), true);
+  },
+
+  appendCompanionEvent: (conversationId, event) => {
+    set((state) => ({ conversations: state.conversations.map((conversation) => {
+      if (conversation.id !== conversationId || event.conversationId !== conversation.id || event.companionId !== conversation.companionId || conversation.messages.some((message) => message.sourceEventId === event.eventId)) return conversation;
+      const preferences = voicePreferencesForConversation(Boolean(conversation.companionId), conversation.voicePreferences);
+      const latestUser = conversation.messages.filter(message => message.role === 'user').at(-1);
+      const voice = event.content.trim() && replyWantsVoice(preferences, latestUser?.voice, latestUser?.content)
+        ? { status: 'pending' as const, durationMs: 0, requestId: createId(), voiceId: preferences.voiceId } : undefined;
+      return {
+        ...conversation,
+        updatedAt: Math.max(Date.now(), event.createdAt),
+        unreadCount: conversation.id === state.activeConversationId ? 0 : Math.min(999, (conversation.unreadCount ?? 0) + 1),
+        messages: [...conversation.messages, {
+          id: createId(), voice, role: 'assistant', content: event.content, attachments: event.attachments ?? [], createdAt: event.createdAt,
+          status: 'complete', sourceEventId: event.eventId, completedAt: event.createdAt,
+        }],
+      };
+    }) }));
     schedulePersistence(get(), true);
   },
 
@@ -681,6 +806,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...message,
         content: '',
         attachments: [],
+        voice: undefined,
         status: 'streaming' as const,
         errorMessage: undefined,
         errorCode: undefined,

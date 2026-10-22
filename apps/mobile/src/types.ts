@@ -1,3 +1,4 @@
+import type { VoiceMessage, VoicePreferences } from './lib/voice';
 import type { GeneratedAttachment, KnowledgeResult, ReasoningEffort, TokenUsage, Verbosity } from '@nova-chat/protocol';
 
 export type MessageStatus = 'complete' | 'streaming' | 'error' | 'cancelled';
@@ -33,6 +34,7 @@ export type AttachmentUploadState = {
 export type AppAttachment = GeneratedAttachment;
 
 export type AppMessage = {
+  voice?: VoiceMessage;
   id: string;
   role: 'user' | 'assistant';
   content: string;
@@ -52,6 +54,8 @@ export type AppMessage = {
   model?: string;
   /** Durable gateway request used to reconnect after a stream or app interruption. */
   generationRequestId?: string;
+  /** Idempotency key for a delayed or proactive companion message. */
+  sourceEventId?: string;
   /** Frozen generation controls for this individual answer. */
   generationOptions?: {
     reasoningEffort: ReasoningEffort;
@@ -67,6 +71,9 @@ export type AppMessage = {
 };
 
 export type Conversation = {
+  voicePreferences?: VoicePreferences;
+  /** Number of companion messages received while this topic was not open. */
+  unreadCount?: number;
   /** Normal conversations use Nova; companion conversations resolve a server-owned profile. */
   kind?: 'normal' | 'companion';
   companionId?: string;
@@ -111,6 +118,7 @@ export type RootStackParamList = {
   Security: undefined;
   Assistants: undefined;
   Companions: { editId?: string } | undefined;
+  CompanionConversations: { companionId: string; companionName: string };
   Knowledge: undefined;
   Diagnostics: undefined;
   Saved: undefined;

@@ -3,18 +3,31 @@ services:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
     env_file:
       - services/gateway/.env
     environment:
       NODE_ENV: production
       DATA_DIR: /app/data
     ports:
-      - "127.0.0.1:8787:8787"
+      - "${GATEWAY_BIND_ADDRESS:-0.0.0.0}:${GATEWAY_PORT:-8787}:8787"
     volumes:
       - nova-chat-data:/app/data
+    # The application writes only to /app/data; keep the container root immutable.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
+    # Give the gateway time to mark itself unready and drain active model jobs.
+    stop_grace_period: 90s
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8787/health"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8787/readyz"]
       interval: 30s
       timeout: 5s
       retries: 3

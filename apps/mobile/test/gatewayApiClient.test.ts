@@ -49,6 +49,7 @@ describe('gateway JSON request headers', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls.map(([, init]) => init?.method)).toEqual(['POST', 'POST', 'POST', 'DELETE']);
     for (const [, init] of fetchMock.mock.calls) {
+      expect(init?.headers).toEqual(expect.objectContaining({ 'x-nova-app-version': '1.1.31', 'x-nova-app-version-code': '33' }));
       expect(init?.body).toBeUndefined();
       expect(init?.headers).toEqual(expect.objectContaining({ authorization: 'Bearer session-token' }));
       expect(init?.headers).not.toHaveProperty('content-type');

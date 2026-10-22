@@ -1,4 +1,4 @@
-import { COMPANION_PROFILE_VERSION_HEADER, companionProfileInputSchema, companionProfileSchema, knowledgeImportInfoSchema, type CompanionProfile, type CompanionProfileInput } from '@nova-chat/protocol';
+import { COMPANION_PROFILE_VERSION_HEADER, companionEventSchema, companionProfileInputSchema, companionProfileSchema, knowledgeImportInfoSchema, type CompanionEvent, type CompanionProfile, type CompanionProfileInput } from '@nova-chat/protocol';
 import { z } from 'zod';
 import { knowledgeDocumentSchema, knowledgeResultSchema, type KnowledgeResult, type KnowledgeDocument, type AttachmentRef, type ToolActivity } from '@nova-chat/protocol';
 import { File, UploadType } from 'expo-file-system';
@@ -8,9 +8,11 @@ import { normalizeServerUrl, toRestUrl } from '../lib/connection';
 import type { PendingAttachment, UserProfile } from '../types';
 import { normalizeUserProfile } from '../lib/userDisplayName';
 import { GatewayUploadResponseError, parseGatewayUploadResponse } from './gatewayUploadResponse';
+import { appVersionHeaders, reportUpgradeRequired } from '../lib/appUpdate';
+import type { AppUpdate } from '@nova-chat/protocol';
 
 export class GatewayApiError extends Error {
-  constructor(readonly code: string, message: string, readonly retryable: boolean, readonly status: number) {
+  constructor(readonly code: string, message: string, readonly retryable: boolean, readonly status: number, readonly details?: AppUpdate) {
     super(message);
     this.name = 'GatewayApiError';
   }
@@ -21,6 +23,7 @@ export type SetupStatus = {
   bootstrapTokenRequired: boolean;
   registrationEnabled: boolean;
   providerConfigured?: boolean;
+  appUpdate?: AppUpdate;
 };
 
 export type AttachmentUploadProgress = {
@@ -58,6 +61,7 @@ export type GenerationJob = {
   responseId?: string;
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
   attachments?: AttachmentRef[];
+  segments?: string[];
   tools?: ToolActivity[];
   knowledge?: KnowledgeResult;
   error?: { code: string; message: string; retryable: boolean };
@@ -71,7 +75,7 @@ function normalizeAuthResponse(data: AuthResponse): AuthResponse {
   return { ...data, user: normalizeUserProfile(data.user) };
 }
 
-async function requestJson<T>(
+export async function requestJson<T>(
   serverUrl: string,
   route: string,
   options: RequestInit & { accessToken?: string; timeoutMs?: number } = {},
@@ -90,9 +94,10 @@ async function requestJson<T>(
     const response = await fetch(toRestUrl(base, route), {
       ...init,
       headers: {
+        ...appVersionHeaders,
         ...(hasBody && !isFormData ? { 'content-type': 'application/json' } : {}),
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
-        ...(route.startsWith('/v1/companions') ? { [COMPANION_PROFILE_VERSION_HEADER]: '2' } : {}),
+        ...(route.startsWith('/v1/companions') ? { [COMPANION_PROFILE_VERSION_HEADER]: '3' } : {}),
         ...(headers ?? {}),
       },
       signal: controller.signal,
@@ -101,11 +106,13 @@ async function requestJson<T>(
     let data: any;
     try { data = text ? JSON.parse(text) : undefined; } catch { /* A proxy can return HTML, including HTTP 200. */ }
     if (!response.ok) {
+      reportUpgradeRequired(base, data?.error ?? {});
       throw new GatewayApiError(
         String(data?.error?.code ?? `http_${response.status}`),
         String(data?.error?.message ?? gatewayHttpErrorMessage(response.status)),
         Boolean(data?.error?.retryable ?? response.status >= 500),
         response.status,
+        data?.error?.details,
       );
     }
     if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -127,6 +134,10 @@ async function requestJson<T>(
 
 export function fetchSetupStatus(serverUrl: string): Promise<SetupStatus> {
   return requestJson(serverUrl, '/v1/setup/status');
+}
+
+export function fetchAppUpdate(serverUrl: string, signal?: AbortSignal): Promise<{ update: AppUpdate | null }> {
+  return requestJson(serverUrl, '/v1/app/update', { signal });
 }
 
 export async function login(serverUrl: string, input: { email: string; password: string; deviceId: string }): Promise<AuthResponse> {
@@ -177,6 +188,11 @@ export function deleteCompanion(serverUrl: string, accessToken: string, id: stri
   return requestJson(serverUrl, `/v1/companions/${encodeURIComponent(id)}`, { method: 'DELETE', accessToken });
 }
 
+export async function listCompanionEvents(serverUrl: string, accessToken: string, companionId: string, conversationId: string, after = 0, signal?: AbortSignal): Promise<CompanionEvent[]> {
+  const data = await requestJson<{ events: unknown[] }>(serverUrl, `/v1/companions/${encodeURIComponent(companionId)}/events?conversationId=${encodeURIComponent(conversationId)}&after=${Math.max(0, Math.floor(after))}`, { accessToken, signal });
+  return z.array(companionEventSchema).parse(data.events ?? []);
+}
+
 const sessionListSchema = z.object({ sessions: z.array(z.object({
   id: z.string().uuid(), deviceId: z.string().max(128), createdAt: z.number().finite(), expiresAt: z.number().finite(), current: z.boolean(),
 })) });
@@ -221,15 +237,17 @@ export async function removeAvatar(serverUrl: string, accessToken: string): Prom
   return normalizeUserProfile(data.user);
 }
 
-function parseUploadJson<T>(status: number, body: string): T {
+export function parseUploadJson<T>(serverUrl: string, status: number, body: string): T {
   let data: any = {};
   try { data = body ? JSON.parse(body) : {}; } catch { data = {}; }
   if (status < 200 || status >= 300) {
+    reportUpgradeRequired(serverUrl, data?.error ?? {});
     throw new GatewayApiError(
       String(data?.error?.code ?? `http_${status}`),
       String(data?.error?.message ?? `服务器返回了 ${status}。`),
       Boolean(data?.error?.retryable ?? status >= 500),
       status,
+      data?.error?.details,
     );
   }
   return data as T;
@@ -263,11 +281,11 @@ export async function uploadAvatar(serverUrl: string, accessToken: string, file:
       uploadType: UploadType.MULTIPART,
       fieldName: 'file',
       mimeType: file.mimeType,
-      headers: { authorization: `Bearer ${accessToken}` },
+      headers: { ...appVersionHeaders, authorization: `Bearer ${accessToken}` },
       signal: controller.signal,
       sessionType: 'foreground',
     });
-    return normalizeUserProfile(parseUploadJson<{ user: UserProfile }>(result.status, result.body).user);
+    return normalizeUserProfile(parseUploadJson<{ user: UserProfile }>(base, result.status, result.body).user);
   } catch (error) {
     if (error instanceof GatewayApiError) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
@@ -352,7 +370,7 @@ export async function uploadAttachment(
       uploadType: UploadType.MULTIPART,
       fieldName: 'file',
       mimeType: file.mimeType,
-      headers: { authorization: `Bearer ${accessToken}` },
+      headers: { ...appVersionHeaders, authorization: `Bearer ${accessToken}` },
       signal: controller.signal,
       sessionType: 'foreground',
     });
@@ -360,7 +378,8 @@ export async function uploadAttachment(
   } catch (error) {
     if (error instanceof GatewayApiError) throw error;
     if (error instanceof GatewayUploadResponseError) {
-      throw new GatewayApiError(error.code, error.message, error.retryable, error.status);
+      reportUpgradeRequired(base, error);
+      throw new GatewayApiError(error.code, error.message, error.retryable, error.status, error.details);
     }
     if (error instanceof Error && error.name === 'AbortError') {
       throw new GatewayApiError(
@@ -514,4 +533,9 @@ export async function testCompanionProvider(serverUrl: string, accessToken: stri
 
 export async function getCompanion(serverUrl: string, accessToken: string, id: string): Promise<CompanionProfile> {
   return parseCompanionResponse(companionResponseSchema, await requestJson(serverUrl, `/v1/companions/${encodeURIComponent(id)}`, { accessToken })).companion;
+}
+
+export function registerCompanionPushDevice(serverUrl: string, accessToken: string, token: string, signal?: AbortSignal): Promise<{ ok: true }> {
+  return requestJson(serverUrl, '/v1/companion-notifications/device', { accessToken, method: 'PUT',
+    body: JSON.stringify({ token, serverUrl: normalizeServerUrl(serverUrl) }), signal });
 }

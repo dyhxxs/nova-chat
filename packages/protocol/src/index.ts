@@ -1,6 +1,8 @@
 import { z } from 'zod';
+export { APP_VERSION_HEADER, APP_VERSION_CODE_HEADER, appUpdateSchema, type AppUpdate } from './appUpdate.js';
+export { COMPANION_DEFAULT_PERSONA_PROMPT } from './companionPersona.js';
 
-// Companion v2 adds appearance and a reference face; /v1 defaults to the original shape.
+// Companion v2 adds appearance; v3 adds a full persona prompt. Legacy clients opt in by header.
 export const COMPANION_PROFILE_VERSION_HEADER = 'x-nova-companion-profile-version';
 
 export const DEFAULT_MODEL_ID = 'gpt-5.6-sol';
@@ -233,6 +235,7 @@ export const companionContextSchema = z.object({
   mood: companionMoodSchema.optional(),
   memoryEnabled: z.boolean().default(false),
   proactiveMessagesEnabled: z.boolean().default(false),
+  personaPrompt: z.string().trim().max(12_000).default(''),
   appearance: z.string().trim().max(2000).default(''),
   avatarFileId: z.string().uuid().nullable().default(null),
 }).strict();
@@ -258,6 +261,7 @@ export const companionProfileInputSchema = z.object({
   mood: companionMoodSchema.optional(),
   memoryEnabled: z.boolean().optional(),
   proactiveMessagesEnabled: z.boolean().optional(),
+  personaPrompt: z.string().trim().max(12_000).optional(),
   appearance: z.string().trim().max(2000).optional(),
   avatarFileId: z.string().uuid().nullable().optional(),
 }).strict();
@@ -299,6 +303,7 @@ export const helloMessageSchema = z.object({
   accessToken: z.string().max(4_096).default(''),
   deviceId: z.string().min(8).max(128),
   appVersion: z.string().max(50).optional(),
+  appVersionCode: z.number().int().nonnegative().safe().optional(),
 });
 
 export const startMessageSchema = z.object({
@@ -335,14 +340,28 @@ export type ToolActivity = {
   status: 'running' | 'completed' | 'failed';
 };
 
+/** A companion message that can arrive after the user's turn has finished. */
+export const companionEventSchema = z.object({
+  eventId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  companionId: z.string().uuid(),
+  kind: z.enum(['message', 'photo']),
+  content: z.string().max(100_000),
+  attachments: z.array(generatedAttachmentSchema).max(8).default([]),
+  createdAt: z.number().int().nonnegative(),
+  sourceRequestId: z.string().uuid().optional(),
+});
+export type CompanionEvent = z.infer<typeof companionEventSchema>;
+
 export type ServerSocketMessage =
   | { type: 'ready' }
   | { type: 'started'; requestId: string }
   | { type: 'tool'; requestId: string; activity: ToolActivity }
   | { type: 'delta'; requestId: string; delta: string }
-  | { type: 'done'; requestId: string; model?: string; responseId?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[]; tools?: ToolActivity[]; knowledge?: KnowledgeResult }
+  | { type: 'done'; requestId: string; model?: string; responseId?: string; usage?: TokenUsage; attachments?: GeneratedAttachment[]; segments?: string[]; tools?: ToolActivity[]; knowledge?: KnowledgeResult }
+  | { type: 'companion_event'; event: CompanionEvent }
   | { type: 'cancelled'; requestId: string }
-  | { type: 'error'; requestId?: string; code: string; message: string; retryable: boolean }
+  | { type: 'error'; requestId?: string; code: string; message: string; retryable: boolean; details?: import('./appUpdate.js').AppUpdate }
   | { type: 'pong' };
 
 export const restGenerateSchema = generateRequestSchema;
@@ -353,6 +372,7 @@ export type RestGenerateResponse = {
   responseId?: string;
   usage?: TokenUsage;
   attachments?: GeneratedAttachment[];
+  segments?: string[];
   tools?: ToolActivity[];
   knowledge?: KnowledgeResult;
 };

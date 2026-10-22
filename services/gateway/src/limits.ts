@@ -22,6 +22,10 @@ export class SlidingWindowLimiter {
     return { allowed: true, retryAfterMs: 0 };
   }
 
+  clear(key: string) {
+    this.buckets.delete(key);
+  }
+
   private prune(now: number) {
     if (this.buckets.size < 1_000) return;
     for (const [key, bucket] of this.buckets) {

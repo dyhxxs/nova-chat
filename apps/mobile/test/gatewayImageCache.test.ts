@@ -55,7 +55,7 @@ describe('gateway image cache', () => {
     const request = gatewayImageRequest('http://192.168.0.113:8787', 'session-secret', attachment);
     expect(request.url).toBe(`http://192.168.0.113:8787/v1/files/${attachment.id}`);
     expect(request.url).not.toContain('session-secret');
-    expect(request.headers).toEqual({ authorization: 'Bearer session-secret' });
+    expect(request.headers).toEqual({ authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.31', 'x-nova-app-version-code': '33' });
     expect(request.cacheFileName).toMatch(/^[a-f0-9]{8}-123e4567-e89b-12d3-a456-426614174000\.jpg$/);
   });
 
@@ -70,7 +70,7 @@ describe('gateway image cache', () => {
       `http://192.168.0.113:8787/v1/files/${attachment.id}`,
       expect.objectContaining({ uri: firstUri }),
       expect.objectContaining({
-        headers: { authorization: 'Bearer session-secret' },
+        headers: { authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.31', 'x-nova-app-version-code': '33' },
         idempotent: true,
       }),
     );

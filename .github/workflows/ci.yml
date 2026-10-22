@@ -9,11 +9,32 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - run: npm run security:audit:gateway
       - run: npm run verify
       - run: npm run build
+      - name: Validate and build the production gateway image
+        run: |
+          cp services/gateway/.env.example services/gateway/.env
+          docker compose config --quiet
+          docker compose build gateway
+      - name: Start the production gateway and verify readiness
+        run: |
+          docker compose up -d gateway
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8787/readyz; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs --tail=100 gateway
+          exit 1
+      - name: Stop the production gateway
+        if: always()
+        run: docker compose down -v
       - run: npx expo export --platform android --output-dir dist/android-bundle --clear
         working-directory: apps/mobile
       - run: npx expo export --platform ios --output-dir dist/ios-bundle --clear

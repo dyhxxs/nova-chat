@@ -1,3 +1,8 @@
+import { useVoiceChat } from '../hooks/useVoiceChat';
+import { useVoiceOutbox } from '../hooks/useVoiceOutbox';
+import { keepVoiceRecording, removeVoiceRecording } from '../services/voiceRecordingFiles';
+import { uploadVoice } from '../services/voiceClient';
+import type { RecordedVoice } from '../lib/voice';
 import { ConversationForkDialog } from '../components/ConversationForkDialog';
 import { useConversationFork } from '../hooks/useConversationFork';
 import { SpeechControls } from '../components/SpeechControls';
@@ -22,6 +27,7 @@ import { buildConversationContext } from '../lib/conversationContext';
 import { uploadProgressPercent } from '../lib/uploadProgress';
 import { friendlyNetworkError } from '../lib/errorMessage';
 import { createId } from '../lib/id';
+import { voicePreferencesForConversation } from '../lib/voice';
 import { resumeGeneration, startGeneration, type GenerationController } from '../services/chatClient';
 import { fetchGatewayModels, getCompanion, GatewayApiError, uploadAttachment } from '../services/gatewayApiClient';
 import { useAppStore } from '../store/useAppStore';
@@ -117,6 +123,7 @@ export function ChatScreen({ navigation }: Props) {
   const bindAssistantGeneration = useAppStore((state) => state.bindAssistantGeneration);
   const setConnectionStatus = useAppStore((state) => state.setConnectionStatus);
   const updateSettings = useAppStore((state) => state.updateSettings);
+  const markConversationRead = useAppStore((state) => state.markConversationRead);
 
   const refreshAvailableModels = useCallback(async () => {
     const requestSequence = ++modelCatalogRequest.current;
@@ -165,6 +172,22 @@ export function ChatScreen({ navigation }: Props) {
     () => conversations.find((item) => item.id === activeConversationId) ?? conversations[0],
     [conversations, activeConversationId],
   );
+  useEffect(() => {
+    const markRead = () => {
+      const id = useAppStore.getState().activeConversationId;
+      if (id) markConversationRead(id);
+    };
+    markRead();
+    const unsubscribe = navigation.addListener('focus', markRead);
+    return unsubscribe;
+  }, [markConversationRead, navigation, conversation?.id]);
+  const voiceChat = useVoiceChat(conversation, settings.serverUrl, accessToken);
+  const [voiceActive, setVoiceActive] = useState(() => navigation.isFocused?.() ?? true);
+  useEffect(() => {
+    const focus = navigation.addListener('focus', () => setVoiceActive(true));
+    const blur = navigation.addListener('blur', () => { setVoiceActive(false); voiceChat.stop(); });
+    return () => { focus(); blur(); };
+  }, [navigation, voiceChat.stop]);
   const companion = conversation?.kind === 'companion';
   const [companionProfile, setCompanionProfile] = useState<CompanionProfile>();
   const latestCompanionPhoto = companion ? conversation.messages.filter(message => message.role === 'assistant' && message.status === 'complete').flatMap(message => message.attachments).filter(file => file.kind === 'image').at(-1)?.id : undefined;
@@ -179,6 +202,7 @@ export function ChatScreen({ navigation }: Props) {
     const unsubscribe = navigation.addListener('focus', load);
     return () => { alive = false; unsubscribe(); };
   }, [conversation?.companionId, latestCompanionPhoto, settings.serverUrl, accessToken, navigation]);
+
   const currentConversationId = conversation?.id ?? '';
   const pendingAttachments = pendingByConversation[currentConversationId] ?? [];
   const uploadStates = uploadStatesByConversation[currentConversationId] ?? {};
@@ -249,22 +273,22 @@ export function ChatScreen({ navigation }: Props) {
                 <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
                 <Text style={[styles.headerStatus, { color: theme.colors.textTertiary, fontFamily: theme.fonts.medium }]}>{statusLabel}</Text>
               </View>
-              <Text numberOfLines={1} style={[styles.headerModel, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>{companion ? (generating ? '正在回复…' : 'AI 陪伴') : (settings.model || '默认模型')}</Text>
+              <Text numberOfLines={1} style={[styles.headerModel, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>{companion ? (conversation?.title || 'AI 陪伴') : (settings.model || '默认模型')}</Text>
             </View>
             <Ionicons name="chevron-down" size={15} color={theme.colors.textSecondary} />
           </Pressable>
         );
       },
-      headerLeft: () => <IconButton name={companion ? "chevron-back" : "menu-outline"} accessibilityLabel={companion ? "返回陪伴列表" : "打开对话历史"} onPress={() => navigation.navigate(companion ? 'Companions' : 'History')} />,
+      headerLeft: () => <IconButton name={companion ? "chevron-back" : "menu-outline"} accessibilityLabel={companion ? "返回人设对话列表" : "打开对话历史"} onPress={() => { if (companion && conversation?.companionId) navigation.navigate('CompanionConversations', { companionId: conversation.companionId, companionName: companionProfile?.name || conversation.companionName || 'TA' }); else navigation.navigate('History'); }} />,
       headerRight: () => (
         <View style={styles.headerActions}>
-          {!companion && <IconButton name="add-outline" accessibilityLabel="新建对话" onPress={() => { newConversation(); void Haptics.selectionAsync(); }} />}
+          <IconButton name="add-outline" accessibilityLabel="新建对话" onPress={() => { if (companion && conversation?.companionId) useAppStore.getState().newCompanionConversation(conversation.companionId, companionProfile?.name || conversation.companionName || 'TA'); else newConversation(); void Haptics.selectionAsync(); }} />
           <IconButton name={companion ? "person-outline" : "heart-outline"} accessibilityLabel={companion ? "角色与长相设置" : "打开 AI 陪伴"} onPress={() => navigation.navigate('Companions', companion ? { editId: conversation?.companionId } : undefined)} />
           {!companion && <IconButton name="settings-outline" accessibilityLabel="打开设置" onPress={() => navigation.navigate('Settings')} />}
         </View>
       ),
     });
-  }, [companion, companionProfile?.name, generating, conversation?.companionId, connectionStatus, conversation?.companionName, conversation?.kind, navigation, newConversation, openOptions, settings.model, theme.colors.danger, theme.colors.success, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary, theme.colors.warning, theme.fonts.bold, theme.fonts.medium, theme.fonts.regular]);
+  }, [companion, companionProfile?.name, generating, conversation?.companionId, connectionStatus, conversation?.companionName, conversation?.kind, conversation?.title, navigation, newConversation, openOptions, settings.model, theme.colors.danger, theme.colors.success, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary, theme.colors.warning, theme.fonts.bold, theme.fonts.medium, theme.fonts.regular]);
 
   const runGeneration = useCallback((conversationId: string, assistantMessageId: string): boolean => {
     const currentState = useAppStore.getState();
@@ -348,6 +372,7 @@ export function ChatScreen({ navigation }: Props) {
             model: details.model,
             usage: details.usage,
             attachments: details.attachments,
+            segments: details.segments,
             knowledge: details.knowledge,
           });
           removeActiveGeneration(conversationId, requestId);
@@ -596,6 +621,40 @@ export function ChatScreen({ navigation }: Props) {
     }
   }, [beginTurn, conversation, failAssistant, isVisibleConversation, navigation, pendingByConversation, runGeneration, scrollToBottom, updateUploadState]);
 
+  const startVoiceReply = useCallback((turn: { conversationId: string; assistantMessageId: string }) => {
+    if (!runGeneration(turn.conversationId, turn.assistantMessageId)) failAssistant(turn.conversationId, turn.assistantMessageId, '无法启动回复，请重试。', true);
+  }, [runGeneration, failAssistant]);
+  useVoiceOutbox(settings.serverUrl, accessToken, startVoiceReply);
+
+  const sendRecordedVoice = useCallback(async (recording: RecordedVoice, asText: boolean): Promise<boolean> => {
+    if (!conversation) return false;
+    const snapshot = useAppStore.getState();
+    const conversationId = conversation.id, token = snapshot.accessToken, serverUrl = snapshot.settings.serverUrl;
+    if (!token || !serverUrl) throw new Error('请先登录并连接服务器。');
+    if (!asText) {
+      const kept = await keepVoiceRecording(recording);
+      const current = useAppStore.getState();
+      if (current.accessToken !== token || current.settings.serverUrl !== serverUrl || !current.enqueueRecordedVoice(conversationId, kept)) {
+        await removeVoiceRecording(kept.uri);
+        return false;
+      }
+      scrollToBottom(false);
+      return true;
+    }
+    setUploadingConversations(current => new Set(current).add(conversationId));
+    try {
+      const result = await uploadVoice(serverUrl, token, recording);
+      const current = useAppStore.getState();
+      if (current.accessToken !== token || current.settings.serverUrl !== serverUrl || current.activeConversationId !== conversationId || !current.conversations.some(item => item.id === conversationId)) return false;
+      if (asText) { current.setConversationDraft(conversationId, [current.conversations.find(item => item.id === conversationId)?.draft, result.text].filter(Boolean).join(' ')); return true; }
+      const turn = beginTurn(result.text, [], conversationId, current.settings.model, result.voice);
+      if (!runGeneration(turn.conversationId, turn.assistantMessageId)) failAssistant(turn.conversationId, turn.assistantMessageId, '无法启动回复，请重试。', true);
+      scrollToBottom(false); return true;
+    } finally {
+      setUploadingConversations(current => { const next = new Set(current); next.delete(conversationId); return next; });
+    }
+  }, [beginTurn, conversation, failAssistant, runGeneration, scrollToBottom]);
+
   const stop = useCallback(() => {
     if (!conversation) return;
     const active = [...activeGenerations.current.values()].filter((item) => item.conversationId === conversation.id);
@@ -679,6 +738,7 @@ export function ChatScreen({ navigation }: Props) {
                 model: details.model,
                 usage: details.usage,
                 attachments: details.attachments,
+                segments: details.segments,
                 knowledge: details.knowledge,
               });
               removeActiveGeneration(item.id, requestId);
@@ -768,6 +828,9 @@ export function ChatScreen({ navigation }: Props) {
           renderItem={({ item }) => (
             <MessageBubble
               message={item}
+              onPlayVoice={() => { void voiceChat.play(item); }}
+              onRetryVoice={() => voiceChat.retry(item)}
+              voicePlaying={voiceChat.playingId === item.id}
               companion={companion}
               companionName={companionProfile?.name || conversation.companionName}
               companionFace={companionProfile?.avatarFileId}
@@ -779,8 +842,8 @@ export function ChatScreen({ navigation }: Props) {
               onRetry={item.role === 'assistant' && !(item.status === 'error' && item.retryable === false) ? () => regenerate(item.id) : undefined}
               onEditRequest={item.role === 'assistant' && item.status === 'error' && item.retryable === false ? () => editFailedRequest(item.id) : undefined}
               onToggleStarred={item.role === 'assistant' ? () => useAppStore.getState().toggleMessageStarred(conversation.id, item.id) : undefined}
-              onReadAloud={item.role === 'assistant' ? () => speech.open(item.id) : undefined}
-              readingAloud={speech.state.messageId === item.id && ['preparing', 'speaking'].includes(speech.state.phase)}
+              onReadAloud={item.role === 'assistant' ? () => { if (companion) { speech.stop(); voiceChat.readAloud(item); } else { voiceChat.stop(); speech.open(item.id); } } : undefined}
+              readingAloud={voiceChat.playingId === item.id || (speech.state.messageId === item.id && ['preparing', 'speaking'].includes(speech.state.phase))}
             />
           )}
           contentContainerStyle={styles.listContent}
@@ -807,6 +870,14 @@ export function ChatScreen({ navigation }: Props) {
       <ConversationForkDialog selected={fork.selected} error={fork.error} onClose={fork.close} onConfirm={fork.confirm} onDismissError={fork.dismissError} />
       <SpeechControls selected={speech.selected} state={speech.state} onClose={speech.close} onPlay={speech.play} onStop={speech.stop} />
       <Composer
+        voiceConversationId={conversation.id}
+        voiceActive={voiceActive}
+        serverUrl={settings.serverUrl}
+        accessToken={accessToken}
+        voicePreferences={voicePreferencesForConversation(Boolean(conversation.companionId), conversation.voicePreferences)}
+        onVoicePreferences={preferences => useAppStore.getState().setVoicePreferences(conversation.id, preferences)}
+        onRecordStart={() => { voiceChat.stop(); speech.stop(); Keyboard.dismiss(); }}
+        onRecorded={sendRecordedVoice}
         companion={companion}
         companionName={companionProfile?.name || conversation.companionName}
         text={conversation.draft ?? ''}

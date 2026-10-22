@@ -180,3 +180,60 @@ describe('assistant generation model state', () => {
   });
 
 });
+
+
+describe('companion completion and background messages', () => {
+  beforeEach(() => { vi.useFakeTimers(); useAppStore.getState().clearConversations(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+  it('splits messages without losing later sentences and removes intentional empty companion replies', () => {
+    const state = useAppStore.getState(); const id = state.activeConversationId;
+    useAppStore.setState({ conversations: state.conversations.map(c => c.id === id ? { ...c, companionId: 'companion-a' } : c) });
+    const turn = state.beginTurn('你好', [], id, 'companion-model');
+    state.completeAssistant(id, turn.assistantMessageId, { segments: ['一', '二', '三', '四', '五', '六'], model: 'companion-model' });
+    const messages = useAppStore.getState().conversations.find(c => c.id === id)!.messages;
+    expect(messages.filter(m => m.role === 'assistant').map(m => m.content)).toEqual(['一', '二', '三', '四\n五\n六']);
+    const silent = state.beginTurn('不用回', [], id, 'companion-model');
+    state.completeAssistant(id, silent.assistantMessageId, { segments: [] });
+    expect(assistantMessage(id, silent.assistantMessageId)).toBeUndefined();
+    expect(useAppStore.getState().conversations.find(c => c.id === id)!.messages.at(-1)?.content).toBe('不用回');
+  });
+
+  it('appends a photo once in its own topic while keeping a newer user message', () => {
+    const state = useAppStore.getState(); const id = state.activeConversationId;
+    useAppStore.setState({ conversations: state.conversations.map(c => c.id === id ? { ...c, companionId: 'companion-a' } : c) });
+    state.beginTurn('我去吃饭了', [], id);
+    const event = { eventId: 'event-a', companionId: 'companion-a', conversationId: id, kind: 'photo' as const, content: '给你', createdAt: Date.now(), attachments: [{ id: 'image-a', name: '照片.png', mimeType: 'image/png', kind: 'image' as const, size: 100 }] };
+    state.appendCompanionEvent(id, { ...event, companionId: 'companion-b' });
+    state.appendCompanionEvent(id, { ...event, conversationId: 'other-topic' });
+    expect(useAppStore.getState().conversations.find(c => c.id === id)!.messages.some(m => m.sourceEventId)).toBe(false);
+    state.appendCompanionEvent(id, event); state.appendCompanionEvent(id, event);
+    const messages = useAppStore.getState().conversations.find(c => c.id === id)!.messages;
+    expect(messages.filter(m => m.sourceEventId === 'event-a')).toHaveLength(1);
+    expect(messages.some(m => m.content === '我去吃饭了')).toBe(true);
+    expect(messages.at(-1)).toMatchObject({ content: '给你', attachments: event.attachments, sourceEventId: 'event-a', status: 'complete' });
+  });
+
+  it('tracks unread companion messages per topic and clears them when the topic is opened', () => {
+    const state = useAppStore.getState();
+    const firstTopic = state.newCompanionConversation('companion-a', '角色 A');
+    const secondTopic = useAppStore.getState().newCompanionConversation('companion-a', '角色 A');
+    const event = {
+      eventId: 'event-unread', companionId: 'companion-a', conversationId: firstTopic,
+      kind: 'message' as const, content: '你还好吗？', attachments: [], createdAt: Date.now(),
+    };
+
+    useAppStore.getState().appendCompanionEvent(firstTopic, event);
+    expect(useAppStore.getState().conversations.find(item => item.id === firstTopic)?.unreadCount).toBe(1);
+
+    useAppStore.getState().appendCompanionEvent(firstTopic, event);
+    expect(useAppStore.getState().conversations.find(item => item.id === firstTopic)?.unreadCount).toBe(1);
+
+    useAppStore.getState().setActiveConversation(firstTopic);
+    expect(useAppStore.getState().conversations.find(item => item.id === firstTopic)?.unreadCount).toBe(0);
+
+    const currentTopicEvent = { ...event, eventId: 'event-current', conversationId: secondTopic };
+    useAppStore.getState().setActiveConversation(secondTopic);
+    useAppStore.getState().appendCompanionEvent(secondTopic, currentTopicEvent);
+    expect(useAppStore.getState().conversations.find(item => item.id === secondTopic)?.unreadCount).toBe(0);
+  });
+});

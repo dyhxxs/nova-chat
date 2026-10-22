@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="https://github.com/dyhxxs/nova-chat/actions/workflows/ci.yml"><img src="https://github.com/dyhxxs/nova-chat/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <img src="https://img.shields.io/badge/source-v1.1.27-356859" alt="Source version 1.1.27">
+  <img src="https://img.shields.io/badge/source-v1.1.31-356859" alt="Source version 1.1.31">
   <img src="https://img.shields.io/badge/Android-first-668975" alt="Android first">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-556b60" alt="MIT license"></a>
 </p>
@@ -48,13 +48,13 @@ Administrators can configure regular chat, companion chat and companion images s
 
 ## Current version
 
-Source version: **1.1.27 / Android versionCode 29**. Android installation, real companion conversations and character photos have been checked in MuMu. iOS and Web client code is included; native iOS installation and broader physical-device coverage still need verification.
+Source version: **1.1.31 / Android versionCode 33**. This release includes voice messages, companion conversations, personal knowledge, account security, backup and chat branching, plus gateway probes, request correlation, login protection, graceful draining, administrator audit logs and optional Prometheus metrics. Android installation, real companion conversations and character photos have been checked in MuMu. iOS and Web client code is included; native iOS installation and broader physical-device coverage still need verification.
 
-This update publishes source code. Check [GitHub Releases](https://github.com/dyhxxs/nova-chat/releases) for the versions and binaries actually available. See the [1.1.27 notes](docs/RELEASE_1.1.27.md) and [changelog](CHANGELOG.md).
+This update publishes source code. The current public 1.1.31 Android builds are available from the [download page](https://134.175.139.81/download/): use the [ARM64 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk) for most phones or the [universal APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk) for multi-ABI compatibility. See the [1.1.31 notes](docs/RELEASE_1.1.31.md) for sizes and SHA-256 values; GitHub Releases still reflects whatever versions and binaries have actually been published there.
 
 ## Get started
 
-Use **Node.js 24** and npm.
+Use **Node.js 22.13+** and npm.
 
 ~~~bash
 git clone https://github.com/dyhxxs/nova-chat.git
@@ -84,7 +84,7 @@ npm run dev:mobile
 
 Connect the client to your gateway, create the first administrator through the setup flow, and configure the providers. Android development emulators usually reach the host at http://10.0.2.2:8787; a physical device uses the host's LAN address.
 
-Distributed builds can preset your HTTPS gateway using EXPO_PUBLIC_GATEWAY_URL. Production deployments use HTTPS/WSS. See the [deployment guide](docs/DEPLOYMENT.md) for Docker, reverse proxies and Android builds.
+Distributed builds can preset the gateway with EXPO_PUBLIC_GATEWAY_URL. When no certificate is available, use a fixed public IPv4 over HTTP and build with -AllowHttpIp; streaming automatically uses ws://. Upgrade to HTTPS/WSS later without changing application data. See the [deployment guide](docs/DEPLOYMENT.md) for Docker, public port binding and Android builds.
 
 ## Architecture and data
 
@@ -106,7 +106,7 @@ npm run build
 node scripts/check_release_metadata.mjs
 ~~~
 
-The current source passes **782 automated checks**: 437 mobile, 287 gateway and 58 script checks, plus workspace typechecks, lint and builds. CI also exports Android and iOS Expo bundles; bundle export does not replace native-device testing.
+Validation should be run against the current checkout with `npm run verify` and `npm run build`; test counts are intentionally not frozen in this README. The knowledge baseline can be reproduced with `npm run knowledge:evaluate`; `npm run knowledge:compare` compares lexical ranking with FTS5 BM25. These are synthetic retrieval-layer metrics rather than production performance. CI also exports Android and iOS Expo bundles; bundle export does not replace native-device testing.
 
 Issues and pull requests are welcome, particularly for companion behavior, provider compatibility, accessibility and documentation.
 
@@ -115,5 +115,9 @@ Issues and pull requests are welcome, particularly for companion behavior, provi
 - [Data and usage](docs/USABILITY_AND_SECURITY.md)
 - [Storage and upgrades](docs/STORAGE_MIGRATION.md)
 - [Security](SECURITY.md)
+- [Enterprise readiness](docs/ENTERPRISE_READINESS.md)
+- [Knowledge evaluation](docs/EVALUATION.md)
+- [Portfolio case study](docs/PORTFOLIO_CASE_STUDY.md)
+- [Demo script](docs/DEMO_SCRIPT.md)
 
 Released under the [MIT License](LICENSE). If Nova is useful to you, a Star helps others find it.

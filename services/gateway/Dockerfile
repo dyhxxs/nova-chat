@@ -1,4 +1,6 @@
-FROM node:24-alpine AS build
+ARG NODE_IMAGE=node:22-alpine
+
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/protocol/package.json packages/protocol/package.json
@@ -8,7 +10,7 @@ COPY packages/protocol packages/protocol
 COPY services/gateway services/gateway
 RUN npm run build -w @nova-chat/protocol && npm run build -w @nova-chat/gateway
 
-FROM node:24-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -22,4 +24,3 @@ VOLUME ["/app/data"]
 USER node
 EXPOSE 8787
 CMD ["node", "services/gateway/dist/index.js"]
-

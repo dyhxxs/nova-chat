@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -5,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { loadConfig, type AppConfig } from '../src/config.js';
 import { buildServer } from '../src/server.js';
+import { ModelProvider, type GenerationResult } from '../src/provider.js';
 
 const apps: FastifyInstance[] = [];
 const temporaryDirectories: string[] = [];
@@ -77,10 +79,35 @@ function multipartFile(filename: string, mimeType: string, bytes: Buffer) {
 
 afterEach(async () => {
   while (apps.length) await apps.pop()?.close();
+  vi.restoreAllMocks();
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
 describe('gateway server', () => {
+  it('correlates every JSON error with the request id returned in the header', async () => {
+    const app = await startServer();
+    const requestId = 'support-case-2026-10-19';
+    const response = await app.inject({ method: 'GET', url: '/v1/auth/me', headers: { 'x-request-id': requestId } });
+    expect(response.statusCode).toBe(401);
+    expect(response.headers['x-request-id']).toBe(requestId);
+    expect(response.json().error.requestId).toBe(requestId);
+  });
+
+  it('reports draining readiness and rejects new application requests during shutdown', async () => {
+    const app = await startServer();
+    app.beginDrain();
+    const live = await app.inject('/healthz');
+    expect(live.statusCode).toBe(200);
+    expect(live.json()).toMatchObject({ ok: true, status: 'draining' });
+    const ready = await app.inject('/readyz');
+    expect(ready.statusCode).toBe(503);
+    expect(ready.json()).toMatchObject({ ok: false, status: 'draining' });
+    const rejected = await app.inject('/v1/auth/me');
+    expect(rejected.statusCode).toBe(503);
+    expect(rejected.json().error.code).toBe('server_draining');
+    expect(rejected.headers['retry-after']).toBe('5');
+  });
+
   it('registers an immediately usable non-admin account without a display name or provider fields', async () => {
     const app = await startServer();
     await bootstrap(app);
@@ -118,6 +145,67 @@ describe('gateway server', () => {
     expect(response.json()).toEqual({ ok: true, service: 'nova-chat-gateway', apiMode: 'responses', defaultModel: 'gpt-5.6-sol' });
     expect(response.body).not.toContain('environment-provider-key');
     expect(response.body).not.toContain('legacy-friend-token');
+  });
+
+
+  it('exposes operational probes, correlation ids and protected metrics', async () => {
+    const metricsToken = 'metrics-test-token-with-more-than-24-characters';
+    const app = await startServer({ METRICS_ENABLED: 'true', METRICS_TOKEN: metricsToken });
+    const health = await app.inject({ method: 'GET', url: '/healthz', headers: { 'x-request-id': 'trace-123' } });
+    expect(health.statusCode).toBe(200);
+    expect(health.headers['x-request-id']).toBe('trace-123');
+    expect(health.json()).toMatchObject({ ok: true, status: 'alive' });
+
+    const missingRoute = await app.inject({ method: 'GET', url: '/v1/unknown/tenant-secret-123' });
+    expect(missingRoute.statusCode).toBe(404);
+
+    const ready = await app.inject({ method: 'GET', url: '/readyz' });
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toMatchObject({ ok: true, checks: { database: 'ok', provider: 'configured' } });
+
+    expect((await app.inject({ method: 'GET', url: '/metrics' })).statusCode).toBe(401);
+    const metrics = await app.inject({ method: 'GET', url: '/metrics', headers: { authorization: `Bearer ${metricsToken}` } });
+    expect(metrics.statusCode).toBe(200);
+    expect(metrics.headers['content-type']).toContain('text/plain');
+    expect(metrics.body).toContain('nova_gateway_http_requests_total');
+    expect(metrics.body).toContain('route="/healthz"');
+    expect(metrics.body).toContain('route="/unknown"');
+    expect(metrics.body).not.toContain('tenant-secret-123');
+    expect(metrics.body).not.toContain(metricsToken);
+  });
+
+  it('rate limits repeated login failures per source and account', async () => {
+    const app = await startServer({ LOGIN_ATTEMPTS_PER_WINDOW: '2', LOGIN_WINDOW_MS: '60000' });
+    await bootstrap(app);
+    const payload = { email: 'admin@example.com', password: 'wrong password 12345', deviceId: 'login-limit-device' };
+    expect((await app.inject({ method: 'POST', url: '/v1/auth/login', payload })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: '/v1/auth/login', payload })).statusCode).toBe(401);
+    const limited = await app.inject({ method: 'POST', url: '/v1/auth/login', payload });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.headers['retry-after']).toBeTruthy();
+    expect(limited.json().error.code).toBe('rate_limited');
+  });
+  it('blocks stale clients while exposing update metadata to the current client', async () => {
+    const app = await startServer({
+      NOVA_MINIMUM_APP_VERSION_CODE: '30',
+      NOVA_LATEST_APP_VERSION: '1.1.28',
+      NOVA_LATEST_APP_VERSION_CODE: '30',
+      NOVA_APP_DOWNLOAD_URL: 'https://134.175.139.81/downloads/NovaChat-1.1.28-android-arm64.apk',
+    });
+    const health = await app.inject({ method: 'GET', url: '/health' });
+    expect(health.statusCode).toBe(200);
+    const oldSetup = await app.inject({ method: 'GET', url: '/v1/setup/status' });
+    expect(oldSetup.statusCode).toBe(426);
+    expect(oldSetup.json().error).toMatchObject({ code: 'upgrade_required', retryable: false });
+    expect(oldSetup.json().error.details).toMatchObject({ latestVersion: '1.1.28', latestVersionCode: 30 });
+    const currentSetup = await app.inject({ method: 'GET', url: '/v1/setup/status', headers: {
+      'x-nova-app-version': '1.1.28', 'x-nova-app-version-code': '30',
+    } });
+    expect(currentSetup.statusCode).toBe(200);
+    expect(currentSetup.json().appUpdate).toMatchObject({ minimumVersionCode: 30, latestVersion: '1.1.28' });
+    const appUpdate = await app.inject({ method: 'GET', url: '/v1/app/update' });
+    expect(appUpdate.statusCode).toBe(200);
+    expect(appUpdate.json().update.downloadUrl).toContain('NovaChat-1.1.28');
   });
 
   it('requires a valid conversation scope for durable job lookup and cancellation', async () => {
@@ -275,6 +363,31 @@ describe('gateway server', () => {
     const models = await app.inject({ method: 'GET', url: '/v1/models', headers: bearer(user.accessToken) });
     expect(models.json()).toMatchObject({ models: ['gpt-5.6-luna'], defaultModel: 'gpt-5.6-luna', apiMode: 'responses' });
     expect(models.body).not.toContain(apiKey);
+  });
+
+  it('lets administrators page through an audit trail without exposing secrets', async () => {
+    const app = await startServer();
+    const admin = await bootstrap(app);
+    const user = await register(app, 18);
+
+    const denied = await app.inject({ method: 'GET', url: '/v1/admin/audit', headers: bearer(user.accessToken) });
+    expect(denied.statusCode).toBe(403);
+
+    const first = await app.inject({ method: 'GET', url: '/v1/admin/audit?limit=1', headers: bearer(admin.accessToken) });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().events).toHaveLength(1);
+    expect(first.json().events[0]).toMatchObject({ action: 'auth.register', actorEmail: 'user18@example.com' });
+    expect(first.body).not.toContain('password');
+    expect(first.body).not.toContain('bootstrap-token');
+    expect(first.json().nextBefore).toBeTypeOf('number');
+
+    const next = await app.inject({
+      method: 'GET',
+      url: `/v1/admin/audit?limit=10&before=${first.json().nextBefore}`,
+      headers: bearer(admin.accessToken),
+    });
+    expect(next.statusCode).toBe(200);
+    expect(next.json().events.some((event: { action: string }) => event.action === 'auth.bootstrap')).toBe(true);
   });
 
   it('protects the final enabled administrator and revokes disabled user sessions', async () => {
@@ -477,8 +590,8 @@ describe('companion profiles', () => {
     const second = await register(app, 202);
     const firstList = await app.inject({ method: 'GET', url: '/v1/companions', headers: bearer(first.accessToken) });
     expect(firstList.statusCode).toBe(200);
-    expect(firstList.json().companions).toHaveLength(1);
-    expect(firstList.json().companions[0]).toMatchObject({ name: 'Lumi', templateId: 'cyber-companion-v1' });
+    expect(firstList.json().companions).toHaveLength(2);
+    expect(firstList.json().companions).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'Lumi', templateId: 'cyber-companion-v1' }), expect.objectContaining({ name: '沈知意', templateId: 'shen-zhiyi-v1' })]));
 
     const created = await app.inject({
       method: 'POST',
@@ -563,5 +676,93 @@ describe('companion profiles', () => {
     expect(body.instructions).toContain('用户喜欢夜晚散步');
     expect(body.instructions).toContain('不得使用内疚、威胁、嫉妒、占有');
     expect(JSON.stringify(body)).not.toContain(companionId);
+  });
+});
+
+
+describe('companion prompt profile versions', () => {
+  it('round trips full prompts with v3 while keeping v1 and v2 response shapes stable', async () => {
+    const app = await startServer();
+    await bootstrap(app);
+    const owner = await register(app, 390);
+    const auth = bearer(owner.accessToken);
+    const headers = { ...auth, 'x-nova-companion-profile-version': '3' };
+    const personaPrompt = '你是阿川。\n【性格】\n35岁烘焙师。\n【聊天方式】\n简短、直接。';
+    const created = await app.inject({ method: 'POST', url: '/v1/companions', headers, payload: { name: '阿川', personaPrompt } });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().companion.personaPrompt).toBe(personaPrompt);
+    const id = created.json().companion.id;
+    const patched = await app.inject({ method: 'PATCH', url: `/v1/companions/${id}`, headers, payload: { userName: '小李' } });
+    expect(patched.json().companion.personaPrompt).toBe(personaPrompt);
+    const legacy = await app.inject({ method: 'GET', url: `/v1/companions/${id}`, headers: auth });
+    expect(legacy.json().companion).not.toHaveProperty('personaPrompt');
+    expect(legacy.json().companion).not.toHaveProperty('appearance');
+    const v2 = await app.inject({ method: 'GET', url: `/v1/companions/${id}`, headers: { ...auth, 'x-nova-companion-profile-version': '2' } });
+    expect(v2.json().companion).not.toHaveProperty('personaPrompt');
+    expect(v2.json().companion).toHaveProperty('appearance');
+    const tooLong = await app.inject({ method: 'POST', url: '/v1/companions', headers, payload: { name: '阿川', personaPrompt: 'x'.repeat(12001) } });
+    expect(tooLong.statusCode).toBe(400);
+    const emptyName = await app.inject({ method: 'POST', url: '/v1/companions', headers, payload: { name: '', personaPrompt } });
+    expect(emptyName.statusCode).toBe(400);
+  });
+});
+
+
+describe('consecutive companion chat messages', () => {
+  it('accepts more than two outstanding sends and includes newly completed replies', async () => {
+    const app = await startServer({ MAX_CONCURRENT_PER_DEVICE: '1' }); await bootstrap(app);
+    const owner = await register(app, 503);
+    const profile = await app.inject({ method: 'POST', url: '/v1/companions', headers: bearer(owner.accessToken), payload: { name: '连发测试' } });
+    const companionId = profile.json().companion.id as string; const conversationId = randomUUID();
+    let release!: () => void; const waiting = new Promise<void>(resolve => { release = resolve; });
+    const calls: string[][] = [];
+    vi.spyOn(ModelProvider.prototype, 'generate').mockImplementation(async payload => {
+      calls.push(payload.messages.map(message => message.content));
+      if (calls.length === 1) await waiting;
+      return { text: '收到' + payload.messages.filter(message => message.role === 'user').at(-1)?.content, model: 'test-chat' };
+    });
+    const contents = ['第一条', '第二条', '第三条'];
+    const pending = contents.map((_, index) => app.inject({ method: 'POST', url: '/v1/chat', headers: bearer(owner.accessToken), payload: {
+      requestId: randomUUID(), conversationId, companionId, deviceId: 'continuous-test-device',
+      messages: contents.slice(0, index + 1).map(content => ({ role: 'user', content })), options: {},
+    } }));
+    try {
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      release(); const responses = await Promise.all(pending);
+      expect(responses.map(response => response.statusCode)).toEqual([200, 200, 200]);
+      expect(calls).toEqual([['第一条'], ['第一条', '收到第一条', '第二条'], ['第一条', '收到第一条', '第二条', '收到第二条', '第三条']]);
+    } finally { release(); await Promise.all(pending); }
+  });
+});
+
+describe('asynchronous companion photos', () => {
+  it('finishes the photo turn, accepts more chat and delivers the photo only to its owner', async () => {
+    const app = await startServer(); await bootstrap(app);
+    const owner = await register(app, 501); const other = await register(app, 502);
+    const profile = await app.inject({ method: 'POST', url: '/v1/companions', headers: bearer(owner.accessToken), payload: { name: '照片测试' } });
+    const companionId = profile.json().companion.id as string;
+    const conversationId = 'a4444444-4444-4444-8444-444444444444';
+    let resolvePhoto!: (result: GenerationResult) => void;
+    const photoResult = new Promise<GenerationResult>(resolve => { resolvePhoto = resolve; });
+    vi.spyOn(ModelProvider.prototype, 'generate').mockImplementation(async payload => {
+      if (payload.messages.at(-1)?.content.includes('封面')) return photoResult;
+      return { text: '好 慢慢吃', model: 'test-text' };
+    });
+    const sendTurn = (requestId: string, messages: { role: 'user' | 'assistant'; content: string }[]) => app.inject({ method: 'POST', url: '/v1/chat', headers: bearer(owner.accessToken), payload: { requestId, conversationId, companionId, deviceId: 'photo-test-device', messages, options: {} } });
+    try {
+      const initial = await sendTurn('a3333333-3333-4333-8333-333333333331', [{ role: 'user', content: '把书的封面发给我看看' }]);
+      expect(initial.statusCode).toBe(200); expect(initial.json().text).toBe(''); expect(initial.json().attachments ?? []).toEqual([]);
+      const next = await sendTurn('b3333333-3333-4333-8333-333333333333', [{ role: 'user', content: '把书的封面发给我看看' }, { role: 'user', content: '我去吃饭了' }]);
+      expect(next.statusCode).toBe(200); expect(next.json().text).toBe('好 慢慢吃');
+      const eventUrl = '/v1/companions/' + companionId + '/events?conversationId=' + conversationId;
+      expect((await app.inject({ method: 'GET', url: eventUrl, headers: bearer(owner.accessToken) })).json().events).toEqual([]);
+      resolvePhoto({ text: '给你', model: 'test-photo', attachments: [{ id: 'a5555555-5555-4555-8555-555555555555', name: '照片.png', mimeType: 'image/png', kind: 'image', size: 100 }] });
+      await vi.waitFor(async () => {
+        const events = (await app.inject({ method: 'GET', url: eventUrl, headers: bearer(owner.accessToken) })).json().events;
+        expect(events).toHaveLength(1); expect(events[0]).toMatchObject({ kind: 'photo', content: '给你', attachments: [expect.objectContaining({ kind: 'image' })] });
+      });
+      const denied = await app.inject({ method: 'GET', url: eventUrl, headers: bearer(other.accessToken) });
+      expect(denied.statusCode).toBe(404);
+    } finally { resolvePhoto({ text: '', model: 'test-photo' }); }
   });
 });

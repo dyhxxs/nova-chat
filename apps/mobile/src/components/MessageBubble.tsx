@@ -1,6 +1,7 @@
+import { VoiceMessageBubble, VoiceTranscript, type VoiceBubbleControls } from './VoiceMessageBubble';
 import { CompanionAvatar } from './CompanionAvatar';
 import { KnowledgeSources } from './KnowledgeSources';
-import { memo, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Image, Linking, Platform, Pressable, StyleSheet, View, type ImageStyle, type TextStyle } from 'react-native';
 import { ThemedText as Text } from './ThemedText';
 import * as Clipboard from 'expo-clipboard';
@@ -15,7 +16,7 @@ import { invalidateGatewayImage, loadGatewayImage } from '../services/gatewayIma
 import { TypingDots } from './TypingDots';
 import { UserAvatar } from './UserAvatar';
 
-type Props = {
+type Props = VoiceBubbleControls & {
   companion?: boolean;
   companionName?: string;
   companionFace?: string | null;
@@ -59,6 +60,7 @@ function MarkdownImage({ uri, alt, style }: { uri: string; alt?: string; style?:
         if (!active) return;
         const ratio = validImageAspectRatio(width, height);
         if (ratio) setAspectRatio(ratio);
+
       },
       // Some image hosts reject a separate HEAD/dimension request even though
       // the actual Image request works, so the Image component remains the
@@ -173,17 +175,20 @@ function fileTypeLabel(name: string, mimeType: string): string {
   return '文件';
 }
 
-function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user }: {
+function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user, onSettled }: {
   attachment: AttachmentRef;
   serverUrl: string;
   accessToken?: string;
   user: boolean;
+  onSettled?: () => void;
 }) {
   const theme = useAppTheme();
   const [imageUri, setImageUri] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const settledCallback = useRef(onSettled);
+  settledCallback.current = onSettled;
 
   useEffect(() => {
     let active = true;
@@ -194,6 +199,7 @@ function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user }: {
     if (Platform.OS === 'web' || !accessToken) {
       setLoading(false);
       setFailed(true);
+      settledCallback.current?.();
       return () => { active = false; };
     }
 
@@ -207,6 +213,7 @@ function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user }: {
         if (!active) return;
         setLoading(false);
         setFailed(true);
+        settledCallback.current?.();
       });
 
     return () => { active = false; };
@@ -217,6 +224,7 @@ function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user }: {
     setImageUri(undefined);
     setLoading(false);
     setFailed(true);
+    settledCallback.current?.();
   };
 
   const retry = () => {
@@ -231,6 +239,7 @@ function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user }: {
         uri={imageUri}
         name={attachment.name}
         onError={failDecodedImage}
+        onLoad={onSettled}
       />
     );
   }
@@ -255,7 +264,7 @@ function GatewayAttachmentImage({ attachment, serverUrl, accessToken, user }: {
   );
 }
 
-function NaturalAttachmentImage({ uri, name, onError }: { uri: string; name: string; onError: () => void }) {
+function NaturalAttachmentImage({ uri, name, onError, onLoad }: { uri: string; name: string; onError: () => void; onLoad?: () => void }) {
   const [aspectRatio, setAspectRatio] = useState(DEFAULT_IMAGE_ASPECT_RATIO);
   return (
     <Image
@@ -266,6 +275,7 @@ function NaturalAttachmentImage({ uri, name, onError }: { uri: string; name: str
       onLoad={({ nativeEvent }) => {
         const ratio = validImageAspectRatio(nativeEvent.source.width, nativeEvent.source.height);
         if (ratio) setAspectRatio(ratio);
+        onLoad?.();
       }}
       onError={onError}
       style={[styles.attachmentImage, { aspectRatio }]}
@@ -274,7 +284,7 @@ function NaturalAttachmentImage({ uri, name, onError }: { uri: string; name: str
 }
 
 
-function LocalAttachmentImage({ attachment, user }: { attachment: AppAttachment; user: boolean }) {
+function LocalAttachmentImage({ attachment, user, onSettled }: { attachment: AppAttachment; user: boolean; onSettled?: () => void }) {
   const theme = useAppTheme();
   const [failed, setFailed] = useState(false);
   if (failed) {
@@ -286,11 +296,12 @@ function LocalAttachmentImage({ attachment, user }: { attachment: AppAttachment;
     );
   }
   return (
-    <NaturalAttachmentImage uri={attachment.uri ?? ''} name={attachment.name} onError={() => setFailed(true)} />
+    <NaturalAttachmentImage uri={attachment.uri ?? ''} name={attachment.name} onLoad={onSettled} onError={() => { setFailed(true); onSettled?.(); }} />
   );
 }
 
-function AttachmentGallery({ attachments, serverUrl, accessToken, user }: {
+function AttachmentGallery({ attachments, serverUrl, accessToken, user, onImageSettled }: {
+  onImageSettled?: (id: string) => void;
   attachments: AppAttachment[];
   serverUrl?: string;
   accessToken?: string;
@@ -304,7 +315,7 @@ function AttachmentGallery({ attachments, serverUrl, accessToken, user }: {
         if (attachment.kind === 'image' && attachment.uri) {
           return (
             <View key={attachment.id} style={styles.imageCard}>
-              <LocalAttachmentImage attachment={attachment} user={user} />
+              <LocalAttachmentImage attachment={attachment} user={user} onSettled={onImageSettled ? () => onImageSettled(attachment.id) : undefined} />
             </View>
           );
         }
@@ -316,6 +327,7 @@ function AttachmentGallery({ attachments, serverUrl, accessToken, user }: {
                 serverUrl={serverUrl}
                 accessToken={accessToken}
                 user={user}
+                onSettled={onImageSettled ? () => onImageSettled(attachment.id) : undefined}
               />
             </View>
           );
@@ -343,14 +355,26 @@ function AttachmentGallery({ attachments, serverUrl, accessToken, user }: {
   );
 }
 
-export const MessageBubble = memo(function MessageBubble({ companion, companionName, companionFace, message, serverUrl, accessToken, user, onRetry, onEditRequest, onReadAloud, onToggleStarred, readingAloud, onFork, onRewrite }: Props) {
+export const MessageBubble = memo(function MessageBubble({ companion, companionName, companionFace, message, serverUrl, accessToken, user, onPlayVoice, onRetryVoice, voicePlaying, onRetry, onEditRequest, onReadAloud, onToggleStarred, readingAloud, onFork, onRewrite }: Props) {
   const theme = useAppTheme();
   const [copied, setCopied] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [voiceTranscriptOpen, setVoiceTranscriptOpen] = useState(false);
+  const readyVoice = message.voice?.status === 'ready';
+  const showVoiceBubble = readyVoice || message.voice?.status === 'error' || Boolean(message.role === 'user' && message.voice);
+  useEffect(() => { setVoiceTranscriptOpen(false); }, [message.id]);
   const canRetry = message.status !== 'error' || message.retryable !== false;
   const editLabel = message.errorCode === 'provider_content_rejected' || message.errorCode === 'provider_image_request_rejected' || /图片服务.*(?:描述|照片请求)/.test(message.errorMessage ?? '') ? '修改照片描述' : '修改提问';
   const modelLabel = message.role === 'assistant' ? assistantModelLabel(message) : undefined;
   const messageDetails = useMemo(() => assistantMessageDetails(message), [message]);
+  const imageScope = (serverUrl ?? '') + ':' + (accessToken ?? '') + ':' + message.id;
+  const [settledImages, setSettledImages] = useState<string[]>([]);
+  const settleImage = useCallback((id: string) => {
+    const key = imageScope + ':' + id;
+    setSettledImages(current => current.includes(key) ? current : [...current, key]);
+  }, [imageScope]);
+  const waitingForPhotos = companion && message.role === 'assistant' && message.attachments.some(file => file.kind === 'image' && (file.uri || serverUrl) && !settledImages.includes(imageScope + ':' + file.id));
+  if (companion && message.role === 'assistant' && (message.status === 'streaming' || message.voice?.status === 'pending')) return null;
   const copy = async () => {
     if (!message.content) return;
     await Clipboard.setStringAsync(message.content);
@@ -361,20 +385,24 @@ export const MessageBubble = memo(function MessageBubble({ companion, companionN
 
   if (companion) {
     const mine = message.role === 'user';
-    return <View style={{ alignItems: mine ? 'flex-end' : 'flex-start', marginVertical: 10 }}>
+    return <View accessibilityElementsHidden={waitingForPhotos} importantForAccessibility={waitingForPhotos ? 'no-hide-descendants' : 'auto'} style={[{ alignItems: mine ? 'flex-end' : 'flex-start', marginVertical: 10 }, waitingForPhotos && { opacity: 0, height: 0, marginVertical: 0, overflow: 'hidden' }]}>
       <View style={{ flexDirection: 'row', gap: 10, maxWidth: '94%', alignItems: 'flex-start' }}>
         {!mine && <CompanionAvatar name={companionName || 'TA'} fileId={companionFace} serverUrl={serverUrl || ''} accessToken={accessToken || ''} size={34} />}
-        <Pressable onLongPress={() => void copy()} style={{ flexShrink: 1, minWidth: 48, padding: 13, borderRadius: 17, borderTopLeftRadius: mine ? 17 : 4, borderTopRightRadius: mine ? 4 : 17, backgroundColor: mine ? theme.colors.userBubble : theme.colors.surface }}>
-          <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user={mine} />
-          {!!message.content && (mine
-            ? <Text selectable style={{ color: '#FFFFFF', fontSize: 16, lineHeight: 25 }}>{message.content}</Text>
-            : <AssistantMarkdown content={message.content} />)}
-          {!message.content && message.status === 'streaming' && <TypingDots />}
-          {message.status === 'error' && <View style={{ gap: 10 }}><Text style={{ color: theme.colors.danger, fontSize: 13, lineHeight: 20 }}>{message.errorMessage || '消息暂时没有送达。'}</Text>{canRetry && onRetry && <Pressable accessibilityRole="button" accessibilityLabel="重试陪伴回复" onPress={onRetry} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: theme.colors.primary }}>点按重试</Text></Pressable>}{!canRetry && onEditRequest && <Pressable accessibilityRole="button" accessibilityLabel={editLabel} onPress={onEditRequest} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: theme.colors.primary }}>{editLabel}</Text></Pressable>}</View>}
-          {message.status === 'cancelled' && <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>已停止回复</Text>}
-        </Pressable>
+        <View style={{ flexShrink: 1, minWidth: 48, alignItems: mine ? 'flex-end' : 'flex-start' }}>
+          <Pressable onLongPress={() => void copy()} style={{ minWidth: 48, padding: 13, borderRadius: 17, borderTopLeftRadius: mine ? 17 : 4, borderTopRightRadius: mine ? 4 : 17, backgroundColor: mine ? theme.colors.userBubble : theme.colors.surface }}>
+            <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user={mine} onImageSettled={settleImage} />
+            {showVoiceBubble && <VoiceMessageBubble message={message} onPlayVoice={onPlayVoice} onRetryVoice={onRetryVoice} voicePlaying={voicePlaying} />}
+            {!readyVoice && !!message.content && (mine
+              ? <Text selectable style={{ color: '#FFFFFF', fontSize: 16, lineHeight: 25 }}>{message.content}</Text>
+              : <AssistantMarkdown content={message.content} />)}
+            {!message.content && message.status === 'streaming' && <TypingDots />}
+            {message.status === 'error' && <View style={{ gap: 10 }}><Text style={{ color: theme.colors.danger, fontSize: 13, lineHeight: 20 }}>{message.errorMessage || '消息暂时没有送达。'}</Text>{canRetry && onRetry && <Pressable accessibilityRole="button" accessibilityLabel="重试陪伴回复" onPress={onRetry} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: theme.colors.primary }}>点按重试</Text></Pressable>}{!canRetry && onEditRequest && <Pressable accessibilityRole="button" accessibilityLabel={editLabel} onPress={onEditRequest} style={{ minHeight: 44, justifyContent: 'center' }}><Text style={{ color: theme.colors.primary }}>{editLabel}</Text></Pressable>}</View>}
+            {message.status === 'cancelled' && <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>已停止回复</Text>}
+          </Pressable>
+          {readyVoice && <VoiceTranscript message={message} mine={mine} expanded={voiceTranscriptOpen} onToggle={() => setVoiceTranscriptOpen(open => !open)} />}
+        </View>
       </View>
-      <Text style={{ color: theme.colors.textTertiary, fontSize: 10, marginTop: 6, marginHorizontal: mine ? 4 : 46 }}>{message.status === 'streaming' ? '正在回复…' : new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
+      <Text style={{ color: theme.colors.textTertiary, fontSize: 10, marginTop: 6, marginHorizontal: mine ? 4 : 46 }}>{new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>
     </View>;
   }
 
@@ -382,10 +410,14 @@ export const MessageBubble = memo(function MessageBubble({ companion, companionN
     return (
       <View style={styles.userRow}>
         <View style={styles.userMessageRow}>
-          <Pressable onLongPress={() => void copy()} style={[styles.userBubble, { backgroundColor: theme.colors.userBubble }]}>
-            <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user />
-            {!!message.content && <Text selectable style={[styles.userText, { fontFamily: theme.fonts.regular }]}>{message.content}</Text>}
-          </Pressable>
+          <View style={styles.userMessageColumn}>
+            <Pressable onLongPress={() => void copy()} style={[styles.userBubble, { backgroundColor: theme.colors.userBubble }]}>
+              <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user />
+              {showVoiceBubble && <VoiceMessageBubble message={message} onPlayVoice={onPlayVoice} onRetryVoice={onRetryVoice} voicePlaying={voicePlaying} />}
+              {!message.voice && !!message.content && <Text selectable style={[styles.userText, { fontFamily: theme.fonts.regular }]}>{message.content}</Text>}
+            </Pressable>
+            {readyVoice && <VoiceTranscript message={message} mine expanded={voiceTranscriptOpen} onToggle={() => setVoiceTranscriptOpen(open => !open)} />}
+          </View>
           <UserAvatar user={user} serverUrl={serverUrl} accessToken={accessToken} size={30} />
         </View>
         {message.status === 'complete' && !!message.content.trim() && !message.attachments.length && onRewrite && <Pressable accessibilityRole="button" accessibilityLabel="在新分支改写这条提问" onPress={onRewrite} style={[styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border, marginTop: 6, minHeight: 44 }]}><Ionicons name="create-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>改写提问</Text></Pressable>}
@@ -398,7 +430,11 @@ export const MessageBubble = memo(function MessageBubble({ companion, companionN
       <View style={[styles.avatar, { backgroundColor: theme.colors.primarySoft }]}><Ionicons name="chatbubble-outline" size={16} color={theme.colors.primary} /></View>
       <View style={styles.assistantBody}>
         <AttachmentGallery attachments={message.attachments} serverUrl={serverUrl} accessToken={accessToken} user={false} />
-        {!message.content && message.status === 'streaming' ? <TypingDots /> : !!message.content && <AssistantMarkdown content={message.content} />}
+        {showVoiceBubble && <View style={[styles.assistantVoiceBubble, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
+          <VoiceMessageBubble message={message} onPlayVoice={onPlayVoice} onRetryVoice={onRetryVoice} voicePlaying={voicePlaying} />
+        </View>}
+        {readyVoice && <VoiceTranscript message={message} mine={false} expanded={voiceTranscriptOpen} onToggle={() => setVoiceTranscriptOpen(open => !open)} />}
+        {!readyVoice && !message.content && message.status === 'streaming' ? <TypingDots /> : !readyVoice && !!message.content && <AssistantMarkdown content={message.content} />}
         {message.knowledge && <KnowledgeSources result={message.knowledge} />}
         {message.status === 'error' && (
           <View style={[styles.errorBox, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]}>
@@ -488,8 +524,10 @@ export const MessageBubble = memo(function MessageBubble({ companion, companionN
 const styles = StyleSheet.create({
   userRow: { alignItems: 'flex-end', paddingLeft: 42, paddingRight: 16, marginVertical: 10 },
   userMessageRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, maxWidth: '100%' },
+  userMessageColumn: { alignItems: 'flex-end', maxWidth: '92%', flexShrink: 1 },
   userBubble: { maxWidth: '92%', borderRadius: 20, borderBottomRightRadius: 6, paddingHorizontal: 13, paddingVertical: 10 },
   userText: { color: '#FFFFFF', fontSize: 16, lineHeight: 23, paddingHorizontal: 3 },
+  assistantVoiceBubble: { alignSelf: 'flex-start', maxWidth: '92%', borderRadius: 17, borderTopLeftRadius: 4, paddingHorizontal: 13, paddingVertical: 10, borderWidth: StyleSheet.hairlineWidth },
   assistantRow: { flexDirection: 'row', paddingHorizontal: 16, marginVertical: 12, alignItems: 'flex-start' },
   avatar: { width: 30, height: 30, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginRight: 10, marginTop: 1 },
   assistantBody: { flex: 1, minWidth: 0, paddingTop: 2 },

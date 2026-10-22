@@ -138,6 +138,20 @@ test('public mode rejects local, insecure, temporary and credential-bearing URLs
   }
 });
 
+test('public HTTP IPv4 requires opt-in and uses an unencrypted WebSocket', async () => {
+  const address = 'http://8.8.8.8:8787';
+  const rejected = fixture();
+  await assert.rejects(checkGatewayChat(address, rejected.options), /configuration/);
+  assert.equal(rejected.requests.length, 0);
+
+  const f = fixture();
+  const result = await checkGatewayChat(address, { ...f.options, allowHttpIp: true });
+  assert.equal(result.gatewayUrl, address);
+  assert.equal(result.publicChatVerified, true);
+  assert.equal(f.sockets[0].url, 'ws://8.8.8.8:8787/v1/chat/stream');
+  assert.equal(f.requests.every((request) => new URL(request.url).origin === address), true);
+});
+
 test('loopback option cannot be used to authorize remote or credential-bearing origins', async () => {
   for (const value of ['http://192.168.1.2:8787', origin, 'http://localhost:8787', 'http://secret@127.0.0.1:8787', 'http://127.0.0.1:8787/path']) {
     const f = fixture();

@@ -1,6 +1,7 @@
 import type { AttachmentRef } from '@nova-chat/protocol';
 import { Directory, File, Paths } from 'expo-file-system';
 import { normalizeServerUrl, toRestUrl } from '../lib/connection';
+import { appVersionHeaders } from '../lib/appUpdate';
 
 const CACHE_DIRECTORY_NAME = 'nova-chat-images';
 const DOWNLOAD_TIMEOUT_MS = 60_000;
@@ -40,7 +41,7 @@ export function gatewayImageRequest(
   if (!accessToken) throw new Error('登录已失效。');
   return {
     url: toRestUrl(base, `/v1/files/${encodeURIComponent(attachment.id)}`),
-    headers: { authorization: `Bearer ${accessToken}` },
+    headers: { ...appVersionHeaders, authorization: `Bearer ${accessToken}` },
     cacheFileName: gatewayImageCacheFileName(base, attachment),
   };
 }

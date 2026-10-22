@@ -48,14 +48,18 @@ export function readApkBundle(apk) {
 }
 
 /** A stale-build guard, not an APK signature or live-connectivity verification. */
-export function checkApkGateway(apk, expectedGatewayUrl) {
-  const gatewayUrl = validateFriendGateway(expectedGatewayUrl, { allowTemporary: true });
+export function checkApkGateway(apk, expectedGatewayUrl, { allowHttpIp = false } = {}) {
+  const gatewayUrl = validateFriendGateway(expectedGatewayUrl, { allowTemporary: true, allowHttpIp });
   const bundle = readApkBundle(apk);
   requireBytes(bundle.includes(Buffer.from(gatewayUrl, 'utf8')), 'APK 没有包含本次验证的网关地址，可能复用了旧构建缓存；禁止分发。');
   return { gatewayUrl, bundleBytes: bundle.length, expectedGatewayFound: true };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try { console.log(JSON.stringify(checkApkGateway(await readFile(process.argv[2]), process.argv[3]), null, 2)); }
+  try {
+    const args = process.argv.slice(2);
+    if (!args[0] || !args[1] || args.slice(2).some((arg) => arg !== '--allow-http-ip')) throw new Error('参数无效。');
+    console.log(JSON.stringify(checkApkGateway(await readFile(args[0]), args[1], { allowHttpIp: args.includes('--allow-http-ip') }), null, 2));
+  }
   catch (error) { console.error(error instanceof Error ? error.message : 'APK 网关检查失败。'); process.exitCode = 1; }
 }

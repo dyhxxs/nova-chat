@@ -7,6 +7,7 @@ import Constants from 'expo-constants';
 import { KeyboardAwareView } from '../components/KeyboardAwareView';
 import { useAppTheme } from '../hooks/useAppTheme';
 import { normalizeServerUrl } from '../lib/connection';
+import { applyAppUpdate } from '../lib/appUpdate';
 import { selectGatewayModel } from '../lib/modelSelection';
 import { bootstrapAdmin, fetchGatewayModels, fetchSetupStatus, GatewayApiError, login, register, type SetupStatus } from '../services/gatewayApiClient';
 import { useAppStore } from '../store/useAppStore';
@@ -47,6 +48,7 @@ export function LoginScreen() {
       setServerUrl(normalized);
       updateSettings({ serverUrl: normalized });
       setSetup(status);
+      applyAppUpdate(normalized, status.appUpdate);
       setMode((current) => status.needsBootstrap ? 'bootstrap' : current === 'register' && status.registrationEnabled ? 'register' : 'login');
       if (!BUILT_IN_GATEWAY_URL) setShowServerSettings(false);
       setMessage({ ok: true, text: status.needsBootstrap ? '网关已连接，需要创建首位管理员。初始化口令由服务器所有者提供，不是 SSH 或宝塔密码。' : status.providerConfigured === false ? '服务器已连接，但管理员尚未配置模型服务。请联系管理员完成配置。' : '服务器已连接，可以登录或注册。' });

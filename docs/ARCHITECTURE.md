@@ -166,7 +166,7 @@ SQLite 表：
 - `sessions`：Token 哈希、设备 ID、过期时间；
 - `provider_settings`：加密 Key 和模型配置；
 - `files`：附件元数据和所有者；
-- `audit_log`：关键管理/认证操作。
+- `audit_log`：关键管理/认证操作；管理员可通过 `GET /v1/admin/audit` 按游标分页读取脱敏事件。
 
 数据库启用 WAL、外键和 busy timeout。当前设计适合单实例或小规模部署。多实例部署需要共享数据库、对象存储、分布式限流和一致的主密钥。
 

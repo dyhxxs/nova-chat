@@ -1,4 +1,7 @@
-param([Parameter(Mandatory=$true)][string]$GatewayUrl)
+param(
+  [Parameter(Mandatory=$true)][string]$GatewayUrl,
+  [switch]$AllowHttpIp
+)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $mobile = Join-Path $root 'apps\mobile'
@@ -14,7 +17,9 @@ try {
   try {
     & node scripts/check_release_metadata.mjs
     if ($LASTEXITCODE -ne 0) { throw 'Release metadata mismatch.' }
-    $gatewayCheck = & node scripts/check_owner_gateway.mjs $GatewayUrl
+    $ownerArgs = @('scripts/check_owner_gateway.mjs', $GatewayUrl)
+    if ($AllowHttpIp) { $ownerArgs += '--allow-http-ip' }
+    $gatewayCheck = & node @ownerArgs
     if ($LASTEXITCODE -ne 0) { throw 'Owner gateway preflight failed.' }
     $verifiedGateway = [string](($gatewayCheck -join "`n" | ConvertFrom-Json).gatewayUrl)
     Write-Output ($gatewayCheck -join "`n")
@@ -27,7 +32,11 @@ try {
   $version = [string]$config.expo.version
   $versionCode = [int]$config.expo.android.versionCode
   $env:EXPO_PUBLIC_GATEWAY_URL = $verifiedGateway
-  $env:ALLOW_CLEARTEXT = 'false'
+  $gatewayUri = [Uri]$verifiedGateway
+  $usesCleartext = $gatewayUri.Scheme -eq 'http'
+  if ($usesCleartext -and -not $AllowHttpIp) { throw 'HTTP 公网 IP 构建必须显式指定 -AllowHttpIp。' }
+  $env:ALLOW_CLEARTEXT = if ($usesCleartext) { 'true' } else { 'false' }
+  if ($usesCleartext) { Write-Warning '当前构建使用公网 IP + HTTP；Android/iOS 明文网络已显式开启，Session 会以明文传输。' }
   if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = 'D:\Android\Sdk' }
   $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
   Push-Location $mobile
@@ -52,11 +61,13 @@ try {
   if ($LASTEXITCODE -ne 0 -or -not $badging.Contains("package: name='com.novachat.mobile'") -or -not $badging.Contains("versionName='$version'") -or -not $badging.Contains("versionCode='$versionCode'") -or -not $badging.Contains("native-code: 'arm64-v8a'")) { throw 'APK identity/version/ABI mismatch.' }
   & $signer verify $source
   if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
-  & node (Join-Path $PSScriptRoot 'check_apk_gateway.mjs') $source $verifiedGateway
+  $apkGatewayArgs = @((Join-Path $PSScriptRoot 'check_apk_gateway.mjs'), $source, $verifiedGateway)
+  if ($AllowHttpIp) { $apkGatewayArgs += '--allow-http-ip' }
+  & node @apkGatewayArgs
   if ($LASTEXITCODE -ne 0) { throw 'APK contains a stale gateway.' }
   & (Join-Path $tools.FullName 'zipalign.exe') -c -P 16 4 $source
   if ($LASTEXITCODE -ne 0) { throw 'APK alignment verification failed.' }
-  $finalCheck = & node (Join-Path $PSScriptRoot 'check_owner_gateway.mjs') $verifiedGateway
+  $finalCheck = & node @ownerArgs
   if ($LASTEXITCODE -ne 0) { throw 'Gateway post-build check failed.' }
   $targetDir = Join-Path $root "artifacts\server-test-$version"
   New-Item -ItemType Directory -Force -Path $targetDir | Out-Null

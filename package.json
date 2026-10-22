@@ -1,6 +1,6 @@
 {
   "name": "nova-chat",
-  "version": "1.1.27",
+  "version": "1.1.31",
   "private": true,
   "description": "Characterful AI companions and a capable everyday assistant, with customizable personas, character photos, multi-model chat and a self-hosted gateway.",
   "repository": {
@@ -51,7 +51,15 @@
     "test:scripts": "node --test scripts/test/*.test.mjs",
     "gateway:check": "node scripts/check_gateway.mjs",
     "gateway:check-chat": "node scripts/check_gateway_chat.mjs",
-    "benchmark:mobile": "node --import tsx scripts/benchmark_mobile.mjs"
+    "gateway:smoke": "node scripts/check_gateway_runtime.mjs",
+    "gateway:backup": "node scripts/backup_gateway.mjs",
+    "gateway:backup:verify": "node scripts/backup_gateway.mjs --verify",
+    "gateway:backup:restore": "node scripts/backup_gateway.mjs --restore",
+    "benchmark:mobile": "node --import tsx scripts/benchmark_mobile.mjs",
+    "knowledge:evaluate": "node --import tsx scripts/evaluate_knowledge.mjs",
+    "knowledge:compare": "node --import tsx scripts/evaluate_knowledge.mjs --strategy compare --output-dir artifacts/knowledge-evaluation-compare",
+    "security:audit:gateway": "npm audit --workspace @nova-chat/gateway --omit=dev --audit-level=high",
+    "gateway:e2e": "node --import tsx scripts/gateway_e2e.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

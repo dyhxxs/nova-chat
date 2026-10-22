@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { WebSocket } from 'ws';
 import { checkGateway, validateFriendGateway, readGatewayJson } from './check_gateway.mjs';
+import { currentAppVersion, currentAppVersionCode, currentAppVersionHeaders } from './app_version.mjs';
 
 const MAX_REPLY = 32 * 1024;
 export class ChatCheckError extends Error {
@@ -13,8 +14,8 @@ export class ChatCheckError extends Error {
   }
 }
 
-function checkedOrigin(value, { localOnly, allowTemporary }) {
-  if (!localOnly) return validateFriendGateway(value, { allowTemporary });
+function checkedOrigin(value, { localOnly, allowTemporary, allowHttpIp }) {
+  if (!localOnly) return validateFriendGateway(value, { allowTemporary, allowHttpIp });
   const url = new URL(value);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password
       || url.pathname !== '/' || url.search || url.hash) throw new Error('invalid_loopback_origin');
@@ -24,7 +25,7 @@ function checkedOrigin(value, { localOnly, allowTemporary }) {
 
 /** One synthetic model request, never retried. The caller owns the session lifecycle. */
 export async function checkGatewayChat(value, {
-  accessToken, allowTemporary = false, localOnly = false, requireRegistration = true,
+  accessToken, allowTemporary = false, allowHttpIp = false, localOnly = false, requireRegistration = true,
   fetchImpl = fetch, socketFactory = (url, options) => new WebSocket(url, options),
   httpTimeoutMs = 15_000, chatTimeoutMs = 90_000,
 } = {}) {
@@ -39,7 +40,7 @@ export async function checkGatewayChat(value, {
   async function request(route, { authenticated = true, method = 'GET', expectedStatus = 200 } = {}) {
     const response = await fetchImpl(base + route, {
       method, redirect: 'error', signal: AbortSignal.timeout(httpTimeoutMs),
-      headers: authenticated ? { authorization: `Bearer ${accessToken}` } : {},
+      headers: { ...currentAppVersionHeaders, ...(authenticated ? { authorization: `Bearer ${accessToken}` } : {}) },
     });
     if (response.status !== expectedStatus) {
       await response.body?.cancel().catch(() => {});
@@ -48,7 +49,7 @@ export async function checkGatewayChat(value, {
     return readGatewayJson(response);
   }
   try {
-    base = checkedOrigin(value, { localOnly, allowTemporary });
+    base = checkedOrigin(value, { localOnly, allowTemporary, allowHttpIp });
     if (typeof accessToken !== 'string' || !accessToken.trim() || accessToken.length > 4096
         || /[\s\x00-\x1f\x7f]/.test(accessToken)) fail();
     if (!Number.isInteger(httpTimeoutMs) || httpTimeoutMs < 1 || httpTimeoutMs > 30_000
@@ -61,7 +62,7 @@ export async function checkGatewayChat(value, {
       if (health?.ok !== true || health?.service !== 'nova-chat-gateway'
           || setup?.needsBootstrap !== false || setup?.providerConfigured !== true) fail();
     } else {
-      await checkGateway(base, { allowTemporary, requireRegistration, fetchImpl });
+      await checkGateway(base, { allowTemporary, allowHttpIp, requireRegistration, fetchImpl });
     }
     pass(stage);
     stage = 'authentication_guard';
@@ -89,7 +90,7 @@ export async function checkGatewayChat(value, {
     const startedAt = Date.now();
     const result = await new Promise((resolve, reject) => {
       const wsUrl = new URL('/v1/chat/stream', base);
-      wsUrl.protocol = localOnly ? 'ws:' : 'wss:';
+      wsUrl.protocol = base.startsWith('https:') ? 'wss:' : 'ws:';
       const ws = socketFactory(wsUrl.href, {
         followRedirects: false, handshakeTimeout: httpTimeoutMs, maxPayload: 64 * 1024, perMessageDeflate: false,
       });
@@ -107,7 +108,7 @@ export async function checkGatewayChat(value, {
       ws.on('open', () => {
         if (settled || helloSent) return;
         helloSent = true;
-        try { ws.send(JSON.stringify({ type: 'hello', accessToken, deviceId: payload.deviceId })); }
+        try { ws.send(JSON.stringify({ type: 'hello', accessToken, deviceId: payload.deviceId, appVersion: currentAppVersion, appVersionCode: currentAppVersionCode })); }
         catch { finish(new Error('hello_failed')); }
       });
       ws.on('message', (raw, isBinary) => {
@@ -179,13 +180,13 @@ export async function checkGatewayChat(value, {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const args = process.argv.slice(2);
-    if (!args[0] || args.slice(1).some(arg => !['--allow-temporary', '--local-only', '--existing-accounts-only'].includes(arg))) {
+    if (!args[0] || args.slice(1).some(arg => !['--allow-temporary', '--allow-http-ip', '--local-only', '--existing-accounts-only'].includes(arg))) {
       throw new Error('invalid_arguments');
     }
     const accessToken = process.env.NOVA_RELEASE_SESSION_TOKEN;
     delete process.env.NOVA_RELEASE_SESSION_TOKEN;
     const report = await checkGatewayChat(args[0], {
-      accessToken, allowTemporary: args.includes('--allow-temporary'), localOnly: args.includes('--local-only'), requireRegistration: !args.includes('--existing-accounts-only'),
+      accessToken, allowTemporary: args.includes('--allow-temporary'), allowHttpIp: args.includes('--allow-http-ip'), localOnly: args.includes('--local-only'), requireRegistration: !args.includes('--existing-accounts-only'),
     });
     console.log(JSON.stringify(report, null, 2));
   } catch (error) {

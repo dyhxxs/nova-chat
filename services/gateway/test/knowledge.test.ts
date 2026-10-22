@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateRequestSchema, knowledgeResultSchema } from '@nova-chat/protocol';
 import { AppDatabase } from '../src/database.js';
 import { loadConfig } from '../src/config.js';
-import { KnowledgeError, knowledgeChunks, knowledgeTokens } from '../src/knowledge.js';
+import { KNOWLEDGE_RETRIEVAL_STRATEGIES, KnowledgeError, knowledgeChunks, knowledgeTokens } from '../src/knowledge.js';
 import { ModelProvider } from '../src/provider.js';
 
 const databases: AppDatabase[] = [];
@@ -85,6 +85,14 @@ describe('account-owned persistent knowledge', () => {
     for (let i = 0; i < 16; i++) db.knowledge.save(b.id, '大型' + i, String(i).padEnd(120000, '甲'));
     expect(() => db.knowledge.save(b.id, '超额', '乙'.repeat(120000))).toThrow('容量');
     expect(db.knowledge.list(b.id).usage.chars).toBe(1920000);
+  });
+  it('supports the BM25 strategy for offline retrieval comparison while keeping lexical default', async () => {
+    const { db, a } = await setup();
+    const { document } = db.knowledge.save(a.id, '报销制度', '报销截止日期是每月25日，发票交财务审核。');
+    expect(KNOWLEDGE_RETRIEVAL_STRATEGIES).toEqual(['lexical', 'bm25']);
+    expect(db.knowledge.search(a.id, '报销截止日期', 'bm25').sources[0]?.documentId).toBe(document.id);
+    expect(db.knowledge.search(a.id, '报销截止日期').sources[0]?.documentId).toBe(document.id);
+    expect(db.knowledge.search(a.id, '"* : ()', 'bm25').sources).toEqual([]);
   });
   it('returns bounded labeled original excerpts, no result for irrelevant or syntax-only queries', async () => {
     const { db, a } = await setup();

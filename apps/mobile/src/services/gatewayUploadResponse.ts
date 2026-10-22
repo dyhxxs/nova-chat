@@ -1,5 +1,5 @@
 import { gatewayHttpErrorMessage } from '../lib/gatewayHttpError';
-import type { AttachmentRef } from '@nova-chat/protocol';
+import type { AttachmentRef, AppUpdate } from '@nova-chat/protocol';
 
 export class GatewayUploadResponseError extends Error {
   constructor(
@@ -7,6 +7,7 @@ export class GatewayUploadResponseError extends Error {
     message: string,
     readonly retryable: boolean,
     readonly status: number,
+    readonly details?: AppUpdate,
   ) {
     super(message);
     this.name = 'GatewayUploadResponseError';
@@ -48,6 +49,7 @@ export function parseGatewayUploadResponse(status: number, body: string): Attach
       typeof error?.message === 'string' ? error.message : gatewayHttpErrorMessage(status),
       typeof error?.retryable === 'boolean' ? error.retryable : status >= 500,
       status,
+      error?.details as AppUpdate | undefined,
     );
   }
 

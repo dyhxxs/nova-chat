@@ -1,3 +1,6 @@
+import { CompanionChatQueue, completedCompanionContext } from './companionChatQueue.js';
+import { CompanionPushRuntime } from './companionPush.js';
+import { registerVoiceRoutes } from './voiceRoutes.js';
 import { registerKnowledgeRoutes } from './knowledgeRoutes.js';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
@@ -21,6 +24,7 @@ import {
   type GenerateRequest,
   type ToolActivity,
   type ServerSocketMessage,
+  type ChatMessage,
 } from '@nova-chat/protocol';
 import { bearerToken, tokenMatches } from './auth.js';
 import type { AppConfig } from './config.js';
@@ -32,6 +36,19 @@ import { ModelProvider, type GenerationResult } from './provider.js';
 import { toolCatalog } from './tools/index.js';
 import { classifyAttachment, isSupportedMimeType, mimeTypeForName, normalizeMimeType } from './attachments.js';
 import { isSupportedCompanionTemplate } from './companionAgent.js';
+import { companionPhotoIntent } from './companionPhoto.js';
+import { companionResponseDecision } from './companionResponseDecision.js';
+import { analyzeCompanionTurn } from './companionState.js';
+import { CompanionRuntime } from './companionRuntime.js';
+import { APP_VERSION_CODE_HEADER, appUpdatePolicy, requiresAppUpdate, upgradeRequiredError } from './appUpdate.js';
+import { GatewayMetrics, REQUEST_ID_HEADER, requestIdFromHeader } from './observability.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Mark the process as draining before closing the listener. */
+    beginDrain(): void;
+  }
+}
 
 const credentialsSchema = z.object({
   email: z.string().trim().email().max(254),
@@ -156,9 +173,9 @@ function resolveCompanionPayload(database: AppDatabase, principal: Principal, pa
 
 /** Old apps strictly validate v1 profiles; new fields require an explicit opt-in. */
 function publicCompanionProfile(request: FastifyRequest, profile: CompanionProfile) {
-  if (request.headers[COMPANION_PROFILE_VERSION_HEADER] === '2') return profile;
-  const legacy = { ...profile };
-  return Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== 'appearance' && key !== 'avatarFileId'));
+  const version = request.headers[COMPANION_PROFILE_VERSION_HEADER];
+  if (version === '3') return profile;
+  return Object.fromEntries(Object.entries(profile).filter(([key]) => key !== 'personaPrompt' && (version === '2' || (key !== 'appearance' && key !== 'avatarFileId'))));
 }
 
 function safeFileName(value: string): string {
@@ -204,20 +221,29 @@ function contentDispositionName(value: string): string {
 }
 
 export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
+  const metrics = new GatewayMetrics();
+  let draining = false;
   const app = Fastify({
+    requestIdHeader: REQUEST_ID_HEADER,
+    genReqId: (request) => requestIdFromHeader(request.headers[REQUEST_ID_HEADER]),
     logger: {
       level: config.logLevel,
-      redact: ['req.headers.authorization', 'req.body.password', 'req.body.currentPassword', 'req.body.newPassword', 'req.body.bootstrapToken', 'req.body.apiKey', 'req.body.apiBaseUrl', 'body.apiKey', 'body.apiBaseUrl', 'body.messages', 'body.options.instructions'],
+      redact: ['req.headers.authorization', 'req.headers.cookie', 'req.headers.x-api-key', 'req.body.password', 'req.body.currentPassword', 'req.body.newPassword', 'req.body.bootstrapToken', 'req.body.apiKey', 'req.body.apiBaseUrl', 'body.apiKey', 'body.apiBaseUrl', 'body.messages', 'body.options.instructions'],
     },
     // Long-running conversations are trimmed below, but the request itself must
     // be large enough to reach that code path.
     bodyLimit: 4 * 1024 * 1024,
-    trustProxy: true,
+    trustProxy: config.trustProxy,
   });
+  app.decorate('beginDrain', () => { draining = true; });
   const database = new AppDatabase(config);
   const provider = new ModelProvider(config, database, { warn: (bindings, message) => app.log.warn(bindings, message) });
+  const companionRuntime = new CompanionRuntime(database, provider, { warn: (bindings, message) => app.log.warn(bindings, message) });
+  const companionPush = new CompanionPushRuntime(database, { warn: (bindings, message) => app.log.warn(bindings, message) });
   const limiter = new SlidingWindowLimiter(config.requestsPerMinute);
   const concurrency = new ConcurrencyGate(config.maxConcurrentPerDevice);
+  const companionChatQueue = new CompanionChatQueue(concurrency);
+  const loginLimiter = new SlidingWindowLimiter(config.loginAttemptsPerWindow, config.loginWindowMs);
   const passwordLimiter = new SlidingWindowLimiter(5, 15 * 60_000);
   const socketValidators = new Map<WebSocket, () => boolean>();
 
@@ -227,8 +253,64 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
   await app.register(rateLimit, { max: config.requestsPerMinute * 3, timeWindow: '1 minute' });
+  app.addHook('onRequest', async (request, reply) => {
+    reply.header(REQUEST_ID_HEADER, request.id);
+    metrics.beginRequest();
+  });
+  app.addHook('onResponse', async (request, reply) => {
+    const routeTemplate = request.routeOptions.url;
+    const route = typeof routeTemplate === 'string' && routeTemplate.startsWith('/') ? routeTemplate : '/unknown';
+    metrics.endRequest(request.method, route, reply.statusCode, reply.elapsedTime);
+  });
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (reply.statusCode < 400 || (!Buffer.isBuffer(payload) && typeof payload !== 'string')) return payload;
+    let body: unknown;
+    try { body = JSON.parse(Buffer.isBuffer(payload) ? payload.toString('utf8') : payload); } catch { return payload; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return payload;
+    const envelope = body as { error?: unknown };
+    if (!envelope.error || typeof envelope.error !== 'object' || Array.isArray(envelope.error)) return payload;
+    const error = envelope.error as { requestId?: unknown };
+    if (error.requestId === request.id) return payload;
+    return JSON.stringify({ ...envelope, error: { ...error, requestId: request.id } });
+  });
+  app.setNotFoundHandler(async (request, reply) => reply.code(404).send({
+    error: { code: 'not_found', message: '请求的资源不存在。', retryable: false, requestId: request.id },
+  }));
+  app.setErrorHandler(async (error: unknown, request, reply) => {
+    const candidate = error as { statusCode?: number; code?: string; name?: string };
+    const statusCode = typeof candidate.statusCode === 'number' && candidate.statusCode >= 400 && candidate.statusCode < 500
+      ? candidate.statusCode
+      : 500;
+    const code = statusCode === 413 ? 'payload_too_large' : statusCode === 400 ? 'invalid_request' : 'internal_error';
+    const message = statusCode === 413
+      ? '请求内容超过允许大小。'
+      : statusCode === 400
+        ? '请求格式不正确。'
+        : '网关处理请求失败，请稍后重试。';
+    request.log.error({ requestId: request.id, errorName: candidate.name, errorCode: candidate.code, statusCode }, 'request failed');
+    return reply.code(statusCode).send({ error: { code, message, retryable: statusCode >= 500, requestId: request.id } });
+  });
   await app.register(multipart, {
     limits: { files: 1, fileSize: config.maxFileBytes, fields: 4, parts: 5 },
+  });
+
+  app.addHook('onRequest', async (request, reply) => {
+    const pathname = request.url.split('?')[0];
+    if (draining && request.method !== 'OPTIONS'
+      && pathname !== '/health' && pathname !== '/healthz' && pathname !== '/readyz' && pathname !== '/metrics') {
+      reply.header('cache-control', 'no-store').header('retry-after', '5');
+      return reply.code(503).send({ error: { code: 'server_draining', message: '网关正在平滑下线，请稍后重试。', retryable: true } });
+    }
+    if (request.method === 'OPTIONS' || !pathname?.startsWith('/v1/') || pathname === '/v1/app/update') return;
+    if (requiresAppUpdate(config, request.headers[APP_VERSION_CODE_HEADER])) {
+      reply.header('cache-control', 'no-store');
+      return reply.code(426).send({ error: upgradeRequiredError(config) });
+    }
+  });
+
+  app.get('/v1/app/update', async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    return { update: appUpdatePolicy(config) ?? null };
   });
 
   const requireUser = (request: FastifyRequest, reply: FastifyReply): Principal | undefined => {
@@ -244,10 +326,52 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   };
 
   app.get('/health', async () => {
+    // Health endpoints are intended for probes and must never be cached by a
+    // reverse proxy, because their state can change during a rolling update.
+    // Provider readiness is reported separately by /readyz.
     const settings = database.getProviderSettings();
-    return { ok: true, service: 'nova-chat-gateway', apiMode: settings.apiMode, defaultModel: settings.defaultModel };
+    return { ok: true, service: 'nova-chat-gateway', apiMode: settings.apiMode, defaultModel: settings.defaultModel, ...(draining ? { status: 'draining' } : {}) };
   });
 
+  app.get('/healthz', async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    return { ok: true, service: 'nova-chat-gateway', status: draining ? 'draining' : 'alive' };
+  });
+
+  app.get('/readyz', async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    if (draining) {
+      return reply.code(503).send({ ok: false, service: 'nova-chat-gateway', status: 'draining', checks: { database: 'unknown', provider: 'unknown' } });
+    }
+    try {
+      database.checkHealth();
+      const settings = database.getProviderSettings();
+      const providerConfigured = Boolean(settings.apiBaseUrl && settings.defaultModel
+        && settings.allowedModels.includes(settings.defaultModel)
+        && (settings.authMode === 'none' || settings.apiKey));
+      return reply.code(200).send({
+        ok: true,
+        service: 'nova-chat-gateway',
+        checks: { database: 'ok', provider: providerConfigured ? 'configured' : 'unconfigured' },
+      });
+    } catch {
+      return reply.code(503).send({
+        ok: false,
+        service: 'nova-chat-gateway',
+        checks: { database: 'unavailable', provider: 'unknown' },
+      });
+    }
+  });
+
+  app.get('/metrics', async (request, reply) => {
+    if (!config.metricsEnabled) return reply.code(404).send({ error: { code: 'not_found', message: '请求的资源不存在。', retryable: false } });
+    const suppliedToken = bearerToken(request.headers.authorization) ?? request.headers['x-metrics-token'];
+    if (config.metricsToken && !tokenMatches(typeof suppliedToken === 'string' ? suppliedToken : undefined, config.metricsToken)) {
+      return unauthorized(reply);
+    }
+    reply.type('text/plain; version=0.0.4; charset=utf-8');
+    return metrics.renderPrometheus();
+  });
   app.get('/v1/tools', async (request, reply) => {
     if (!requireUser(request, reply)) return;
     return {
@@ -261,6 +385,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   app.get('/v1/setup/status', async () => {
     const settings = database.getProviderSettings();
     return {
+      appUpdate: appUpdatePolicy(config),
       needsBootstrap: !database.hasAdmin(),
       bootstrapTokenRequired: Boolean(config.adminBootstrapToken),
       registrationEnabled: config.registrationEnabled,
@@ -306,8 +431,13 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   app.post('/v1/auth/login', async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '邮箱或密码格式不正确，密码至少 8 位。', retryable: false } });
+    const loginKey = `${request.ip}:${parsed.data.email.trim().toLowerCase()}`;
+    const loginLimit = loginLimiter.consume(loginKey);
+    if (!loginLimit.allowed) return reply.header('retry-after', String(Math.ceil(loginLimit.retryAfterMs / 1_000))).code(429)
+      .send({ error: { code: 'rate_limited', message: '登录尝试过于频繁，请稍后再试。', retryable: true } });
     const user = database.verifyCredentials(parsed.data.email, parsed.data.password);
     if (!user) return reply.code(401).send({ error: { code: 'invalid_credentials', message: '邮箱或密码错误，或账户已被停用。', retryable: false } });
+    loginLimiter.clear(loginKey);
     const session = database.createSession(user.id, parsed.data.deviceId);
     database.audit(user.id, 'auth.login', user.id);
     return authResponse(user, session);
@@ -495,6 +625,34 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     return { companion: publicCompanionProfile(request, companion) };
   });
 
+  app.put('/v1/companion-notifications/device', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '消息通知需要登录账户。', retryable: false } });
+    const parsed = z.object({ token: z.string().max(256).regex(/^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]+\]$/u), serverUrl: z.string().max(2048).url().refine(value => /^https?:\/\//u.test(value)) }).safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_push_token', message: '通知注册信息无效。', retryable: false } });
+    database.registerCompanionPushDevice(principal.id, principal.sessionId, parsed.data.token, parsed.data.serverUrl);
+    return { ok: true };
+  });
+
+  app.delete('/v1/companion-notifications/device', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    database.removeCompanionPushDevice(principal.sessionId);
+    return { ok: true };
+  });
+
+  app.get('/v1/companions/:id/events', async (request, reply) => {
+    const principal = requireUser(request, reply);
+    if (!principal) return;
+    if (principal.sessionId === 'legacy') return reply.code(403).send({ error: { code: 'account_required', message: '陪伴消息需要登录账户。', retryable: false } });
+    const id = (request.params as { id?: string }).id;
+    const parsed = z.object({ conversationId: z.string().uuid(), after: z.coerce.number().int().min(0).default(0) }).safeParse(request.query);
+    if (!id || !parsed.success) return reply.code(400).send({ error: { code: 'invalid_event_scope', message: '缺少有效的会话标识。', retryable: false } });
+    if (!database.getCompanion(principal.id, id)) return reply.code(404).send({ error: { code: 'companion_not_found', message: '陪伴角色不存在或不属于当前账户。', retryable: false } });
+    return { events: database.listCompanionEvents(principal.id, id, parsed.data.conversationId, parsed.data.after) };
+  });
+
   app.patch('/v1/companions/:id', async (request, reply) => {
     const principal = requireUser(request, reply);
     if (!principal) return;
@@ -527,6 +685,22 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   app.get('/v1/admin/users', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
     return { users: database.listUsers().map(publicUser) };
+  });
+
+  app.get('/v1/admin/audit', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    const parsed = z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      before: z.coerce.number().int().positive().optional(),
+    }).strict().safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_audit_query', message: '审计日志分页参数无效。', retryable: false } });
+    }
+    const events = database.listAuditEvents(parsed.data.limit, parsed.data.before);
+    return {
+      events,
+      nextBefore: events.length === parsed.data.limit ? events[events.length - 1]?.id ?? null : null,
+    };
   });
 
   app.patch('/v1/admin/users/:id', async (request, reply) => {
@@ -630,6 +804,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   });
 
   registerKnowledgeRoutes(app, database, requireUser);
+  registerVoiceRoutes(app, database, config, requireUser);
 
   app.post('/v1/files', async (request, reply) => {
     const principal = requireUser(request, reply);
@@ -710,6 +885,7 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     responseId: job.payload.companionId ? undefined : job.result?.responseId,
     usage: job.payload.companionId ? undefined : job.result?.usage,
     attachments: job.result?.attachments,
+    segments: job.result?.segments,
     tools: job.tools,
     knowledge: job.result?.knowledge,
     error: job.error ? {
@@ -740,11 +916,60 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     retentionTimers.add(timer);
   };
 
+  const persistCompanionTurn = (job: GenerationJob, text: string, attachments: GenerationResult['attachments'] = []) => {
+    if (!job.payload.companionId || !job.payload.companion) return;
+    const userMessage = [...job.payload.messages].reverse().find((message) => message.role === 'user');
+    if (!userMessage) return;
+    const threadMessages: ChatMessage[] = [...job.payload.messages];
+    if (text.trim() || (attachments?.length ?? 0)) {
+      threadMessages.push({ role: 'assistant', content: text, attachments: attachments ?? [] });
+    }
+    database.saveCompanionThread(job.principalId, job.payload.companionId, job.conversationId, threadMessages, job.createdAt);
+    if (database.archiveCompanionTurn(job.principalId, job.payload.companionId, job.conversationId, job.requestId, userMessage.content, text)) {
+      database.recordCompanionInteraction(job.principalId, job.payload.companionId, userMessage.content, text);
+    }
+  };
+
   const executeJob = async (job: GenerationJob) => {
     job.status = 'running';
     job.updatedAt = Date.now();
     persistJob(job, true);
     try {
+      job.controller.signal.throwIfAborted();
+      if (job.payload.companionId) {
+        const previous = database.getCompanionThread(job.principalId, job.payload.companionId, job.conversationId);
+        if (previous) job.payload = { ...job.payload, messages: completedCompanionContext(job.payload.messages, previous.messages) };
+      }
+      // A photo request is a separate life event. Finish the text turn quickly,
+      // then let the image arrive as a normal companion message while the user
+      // keeps chatting. The model never sees a fake synchronous attachment.
+      if (job.payload.companionId && companionPhotoIntent(job.payload) && analyzeCompanionTurn(job.payload.messages).scene !== 'safety') {
+        const text = ''; // The completed image arrives as its own message, with no waiting bubble.
+        job.result = { text, model: 'companion-photo-queue', segments: text ? [text] : [] };
+        job.text = text;
+        persistCompanionTurn(job, text);
+        database.queueCompanionDelivery(job.principalId, job.payload, 'photo', Date.now());
+        job.status = 'completed';
+        job.updatedAt = Date.now();
+        persistJob(job, true);
+        if (text) send(job.socket, { type: 'delta', requestId: job.requestId, delta: text });
+        send(job.socket, { type: 'done', requestId: job.requestId, attachments: [], segments: text ? [text] : [] });
+        companionRuntime.deliverDue();
+        return;
+      }
+      const responseDecision = job.payload.companionId
+        ? companionResponseDecision(job.payload, database.getCompanionRelationship(job.payload.companionId)) : { mode: 'reply' as const };
+      if (job.payload.companionId && responseDecision.mode !== 'reply') {
+        job.result = { text: '', model: 'companion-silence', segments: [] };
+        job.text = '';
+        persistCompanionTurn(job, '');
+        if (responseDecision.mode === 'defer') database.queueCompanionDelivery(job.principalId, job.payload, 'reply', Date.now() + responseDecision.delayMs);
+        job.status = 'completed';
+        job.updatedAt = Date.now();
+        persistJob(job, true);
+        send(job.socket, { type: 'done', requestId: job.requestId, segments: [] });
+        return;
+      }
       const result = await provider.generate(
         job.payload,
         job.principal,
@@ -763,17 +988,24 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
           send(job.socket, { type: 'tool', requestId: job.requestId, activity });
         },
       );
-      job.result = result;
+      const { companionPhotoRequested, ...publicResult } = result;
+      job.result = publicResult;
       // JSON responses may not emit through the streaming callback in every
       // provider implementation, while streamed responses already populated
       // job.text. Keep the authoritative final text in both cases.
       job.text = result.text || job.text;
+      persistCompanionTurn(job, result.text, result.attachments);
+      if (companionPhotoRequested && job.payload.companionId) {
+        database.queueCompanionDelivery(job.principalId, { ...job.payload, companionAction: 'photo',
+          messages: [...job.payload.messages, { role: 'assistant', content: result.text, attachments: [] }] }, 'photo', Date.now());
+        companionRuntime.deliverDue();
+      }
       job.status = 'completed';
       job.updatedAt = Date.now();
       persistJob(job, true);
       send(job.socket, {
         type: 'done', requestId: job.requestId, model: job.payload.companionId ? undefined : result.model, responseId: job.payload.companionId ? undefined : result.responseId,
-        usage: job.payload.companionId ? undefined : result.usage, attachments: result.attachments, tools: result.tools, knowledge: result.knowledge,
+        usage: job.payload.companionId ? undefined : result.usage, attachments: result.attachments, segments: result.segments, tools: result.tools, knowledge: result.knowledge,
       });
     } catch (error) {
       const publicError = toPublicError(error);
@@ -790,7 +1022,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         });
       }
     } finally {
-      concurrency.release(job.principalId);
+      if (!job.payload.companionId) {
+        concurrency.release(job.principalId);
+        companionChatQueue.notifySlotAvailable();
+      }
       retainJob(job);
     }
   };
@@ -814,7 +1049,9 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     };
     jobs.set(job.requestId, job);
     persistJob(job, true);
-    job.promise = executeJob(job);
+    job.promise = payload.companionId
+      ? companionChatQueue.run(principal.id, job.controller.signal, () => executeJob(job))
+      : executeJob(job);
     return job;
   };
 
@@ -876,10 +1113,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     const key = principal.id;
     const rate = limiter.consume(key);
     if (!rate.allowed) return reply.code(429).header('retry-after', Math.ceil(rate.retryAfterMs / 1000)).send({ error: { code: 'rate_limited', message: '请求过于频繁，请稍后再试。', retryable: true } });
-    if (!concurrency.acquire(key)) return reply.code(429).send({ error: { code: 'too_many_concurrent', message: '该账户的并发请求已达到上限。', retryable: true } });
+    if (payload.companionId ? !companionChatQueue.canAccept(key) : !concurrency.acquire(key)) return reply.code(429).send({ error: { code: payload.companionId ? 'too_many_pending' : 'too_many_concurrent', message: payload.companionId ? '待回复消息较多，请稍后再发送。' : '该账户的并发请求已达到上限。', retryable: true } });
     const job = createJob(payload, principal);
     if (!job) {
-      concurrency.release(key);
+      if (!payload.companionId) concurrency.release(key);
       return reply.code(409).send({ error: { code: 'duplicate_request', message: '重复的请求标识。', retryable: false } });
     }
     try {
@@ -950,6 +1187,11 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         const message = parsed.data;
         if (!principal) {
           if (message.type !== 'hello') { send(socket, { type: 'error', code: 'unauthorized', message: '请先登录。', retryable: false }); socket.close(4401, 'unauthorized'); return; }
+          if (requiresAppUpdate(config, message.appVersionCode)) {
+            send(socket, { type: 'error', ...upgradeRequiredError(config) });
+            socket.close(4426, 'upgrade required');
+            return;
+          }
           principal = principalForToken(database, config, message.accessToken);
           if (!principal) { send(socket, { type: 'error', code: 'unauthorized', message: '登录已失效，请重新登录。', retryable: false }); socket.close(4401, 'unauthorized'); return; }
           sessionToken = message.accessToken;
@@ -978,9 +1220,9 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
         const key = principal.id;
         const rate = limiter.consume(key);
         if (!rate.allowed) { send(socket, { type: 'error', requestId: payload.requestId, code: 'rate_limited', message: '请求过于频繁，请稍后再试。', retryable: true }); return; }
-        if (!concurrency.acquire(key)) { send(socket, { type: 'error', requestId: payload.requestId, code: 'too_many_concurrent', message: '该账户的并发请求已达到上限。', retryable: true }); return; }
+        if (payload.companionId ? !companionChatQueue.canAccept(key) : !concurrency.acquire(key)) { send(socket, { type: 'error', requestId: payload.requestId, code: payload.companionId ? 'too_many_pending' : 'too_many_concurrent', message: payload.companionId ? '待回复消息较多，请稍后再发送。' : '该账户的并发请求已达到上限。', retryable: true }); return; }
         const job = createJob(payload, principal, socket);
-        if (!job) { concurrency.release(key); send(socket, { type: 'error', requestId: payload.requestId, code: 'duplicate_request', message: '重复的请求标识。', retryable: false }); return; }
+        if (!job) { if (!payload.companionId) concurrency.release(key); send(socket, { type: 'error', requestId: payload.requestId, code: 'duplicate_request', message: '重复的请求标识。', retryable: false }); return; }
         send(socket, { type: 'started', requestId: payload.requestId });
       })().catch((error: unknown) => {
         app.log.error({ err: error }, 'WebSocket frame processing failed');
@@ -991,8 +1233,11 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   });
 
   app.addHook('onClose', async () => {
+    draining = true;
     clearInterval(sessionSweep);
     clearInterval(snapshotCleanup);
+    await companionRuntime.close();
+    await companionPush.close();
     for (const job of jobs.values()) if (job.status === 'queued' || job.status === 'running') job.controller.abort();
     await Promise.allSettled([...jobs.values()].map((job) => job.promise));
     for (const timer of retentionTimers) clearTimeout(timer);

@@ -68,6 +68,24 @@ test('accepts public HTTPS IPv4 while blocking reserved ranges and alternate loo
   }
 });
 
+test('allows only an explicitly opted-in public IPv4 over HTTP', () => {
+  const address = 'http://8.8.8.8:8787';
+  assert.throws(() => validateFriendGateway(address), /HTTPS/);
+  assert.equal(validateFriendGateway(address, { allowHttpIp: true }), address);
+  for (const value of ['http://gateway.example.com', 'http://192.168.1.2:8787', 'http://127.0.0.1:8787', 'http://10.0.0.1:8787', 'http://[::1]:8787']) {
+    assert.throws(() => validateFriendGateway(value, { allowHttpIp: true }));
+  }
+});
+
+test('public HTTP IP still requires a prepared gateway and preserves readiness checks', async () => {
+  const address = 'http://8.8.8.8:8787';
+  for (const setup of [{ ...ready, needsBootstrap: true }, { ...ready, registrationEnabled: false }, { ...ready, providerConfigured: false }]) {
+    await assert.rejects(checkGateway(address, { allowHttpIp: true, fetchImpl: mocked(setup) }));
+  }
+  const result = await checkGateway(address, { allowHttpIp: true, fetchImpl: mocked() });
+  assert.equal(result.gatewayUrl, address);
+});
+
 test('public IP support does not waive admin, registration, provider or normal TLS checks', async () => {
   const address = 'https://8.8.8.8';
   for (const setup of [{ ...ready, needsBootstrap: true }, { ...ready, registrationEnabled: false }, { ...ready, providerConfigured: false }]) {

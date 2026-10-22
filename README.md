@@ -4,11 +4,11 @@
 
 <h1 align="center">Nova Chat</h1>
 <p align="center"><strong>有性格的 AI 陪伴，也有能把事做好的日常助手。</strong></p>
-<p align="center">自定义角色 · 情绪延续 · 角色照片 · 多模型聊天 · 个人资料库 · 自托管</p>
+<p align="center">自定义人设 · 多话题对话 · 情绪延续 · 角色照片 · 多模型聊天 · 个人资料库 · 自托管</p>
 
 <p align="center">
   <a href="https://github.com/dyhxxs/nova-chat/actions/workflows/ci.yml"><img src="https://github.com/dyhxxs/nova-chat/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <img src="https://img.shields.io/badge/source-v1.1.27-356859" alt="Source version 1.1.27">
+  <img src="https://img.shields.io/badge/source-v1.1.31-356859" alt="Source version 1.1.31">
   <img src="https://img.shields.io/badge/Android-first-668975" alt="Android first">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-556b60" alt="MIT license"></a>
   <a href="https://github.com/dyhxxs/nova-chat/stargazers"><img src="https://img.shields.io/github/stars/dyhxxs/nova-chat?style=flat&color=356859" alt="GitHub stars"></a>
@@ -23,13 +23,15 @@
 
 想有人陪你说两句，也想在需要的时候认真解决一个问题。Nova 把这两种体验放进同一个应用：陪伴有自己的角色和聊天节奏，普通聊天保留模型、工具和资料问答的完整能力。
 
-界面采用暖白与灰绿，给对话留出空间。你可以给角色取名、调整性格、设置长相，也可以接入自己的模型服务，把应用部署给自己或朋友使用。
+界面采用暖白与灰绿，给对话留出空间。你可以给角色取名、粘贴完整人设提示词、设置长相，也可以接入自己的模型服务，把应用部署给自己或朋友使用。
 
-### 一个有性格的聊天对象
+### 和不同的人设聊不同话题
+
+进入 AI 陪伴先选人设，再选择或新建该人设的对话。一个人设可以聊多个话题，各对话分别保存上下文；人物设定、参考脸和主动保存的长期记忆共用。内置 Lumi 和沈知意，也支持粘贴完整提示词新建自己的角色。
 
 默认角色 Lumi 是 **20 岁的女大二学生**，学中文，有自己的课程、朋友和小习惯；有点孤高，熟悉后偶尔露出一点腹黑。回复偏短，少些固定追问、长篇安慰和对话分析。
 
-她会沿着当前聊天延续情绪：被冒犯时可以不高兴，道歉后也不必立刻热情起来。人物背景、说话方式和你允许使用的记忆都可以编辑，默认人设升级会保留你的自定义内容。
+回复只呈现手机上会发出去的话，不写括号动作或心理旁白。人物保留自己的喜好和判断，普通问候可以几个字结束，对感兴趣的事再多聊。日常短句少用句号、逗号，必要时用短行分开表达，不固定补解释和追问。她会沿着当前聊天延续情绪：被冒犯时可以不高兴，道歉后也不必立刻热情起来。人物背景、说话方式和你允许使用的记忆都可以编辑，默认人设升级会保留你的自定义内容。
 
 这是一种基于人物设定和上下文的 AI 角色体验。情绪与日常经历由模型生成；实际风格会随所选模型变化。想了解怎么调出自己的角色，见 [陪伴与人设指南](docs/COMPANION.md)。
 
@@ -37,13 +39,17 @@
 
 在“TA 的长相”里上传或替换参考照片，配上可选的外貌描述。聊天时说“拍张照片给我看看”，就能请求一张当前场景的角色图片。
 
-后续照片会继续使用参考脸，尽量延续人物外观。图片生成需要兼容的图片服务，人物一致性取决于模型能力；失败的照片请求支持修改描述后再试。
+不上传照片时，首张形象按完整人设的年龄、外貌、背景、性格与喜好建立，并保存为该人物共用的参考脸。照片读取当前话题最近多轮内容：正在改稿，就表现改稿动作与稿子、电脑等场景；明确要求换地点时再改变场景。后续照片继续使用参考脸，尽量延续人物外观。图片生成需要兼容的图片服务，人物一致性取决于模型能力；失败的照片请求支持修改描述后再试。
+
+### 像聊天软件一样发语音
+
+聊天输入框支持按住录音、松开发送、上滑取消，也可以先转成文字再编辑。语音气泡可播放并展开文字；AI 可按会话选择自动、语音或文字回复，并固定音色。需要升级网关并配置兼容的语音中转，使用方式和本轮验证范围见 [语音聊天说明](docs/VOICE_CHAT_2026-10-14.md)。
 
 ### 陪你闲聊，也帮你处理正事
 
 | 你想做的事 | Nova 能提供什么 |
 | --- | --- |
-| 日常聊天 | 独立陪伴对话、角色定制、短口语风格与上下文中的情绪延续 |
+| 日常聊天 | 多个人设与各自的独立对话、完整人设提示词、短口语风格与上下文中的情绪延续 |
 | 写作与思考 | 多模型普通聊天、自定义助手、流式回复、Markdown 与代码展示 |
 | 读自己的资料 | 个人资料库、文档导入、原文搜索、带来源片段的资料问答 |
 | 查实时信息 | 时间、天气、计算、单位、日期、参考汇率、搜索与公开网页阅读 |
@@ -60,15 +66,15 @@
 
 ## 当前版本
 
-当前源码为 **1.1.27 / Android versionCode 29**。本版重点更新默认人物、日常短回复、情绪延续、角色照片与管理员模型选择，纳入此前的资料库、账户安全、备份和聊天分支功能。
+当前源码为 **1.1.31 / Android versionCode 33**。本版包含语音消息、陪伴体验、资料库、账户安全、备份和聊天分支功能，并补充 Gateway 的运行探针、请求关联、登录保护、优雅下线、管理员审计日志和可选 Prometheus 指标。
 
 Android 已完成 MuMu 安装与实际聊天、照片验证。项目包含 iOS / Web 客户端代码；iOS 原生安装与完整真机覆盖仍需继续验证。
 
-本次发布的是源码更新。安装包请以 [GitHub Releases](https://github.com/dyhxxs/nova-chat/releases) 中实际提供的版本与说明为准。详见 [1.1.27 更新说明](docs/RELEASE_1.1.27.md) 和 [更新记录](CHANGELOG.md)。
+本次发布的是源码更新。当前公网 1.1.31 安装包可从[下载页](https://134.175.139.81/download/)获取：大多数手机推荐 [ARM64 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-arm64.apk)，需要多架构兼容时使用[通用 APK](https://134.175.139.81/downloads/NovaChat-1.1.31-android-universal.apk)。文件大小和 SHA-256 见 [1.1.31 更新说明](docs/RELEASE_1.1.31.md)；GitHub Releases 中的版本与说明仍以实际发布内容为准。
 
 ## 五分钟开始
 
-需要 **Node.js 24** 与 npm。移动端开发使用 Expo，生产网关可以使用 Docker Compose。
+需要 **Node.js 22.13+** 与 npm。移动端开发使用 Expo，生产网关可以使用 Docker Compose。
 
 ~~~bash
 git clone https://github.com/dyhxxs/nova-chat.git
@@ -105,7 +111,7 @@ npm run dev:gateway
 npm run dev:mobile
 ~~~
 
-Android 开发模拟器通常通过 http://10.0.2.2:8787 访问电脑网关；真机使用同一局域网中的电脑地址。自行构建分发包时，可通过 EXPO_PUBLIC_GATEWAY_URL 预设自己的 HTTPS 网关，普通用户只需登录。
+Android 开发模拟器通常通过 http://10.0.2.2:8787 访问电脑网关；真机使用同一局域网中的电脑地址。自行构建分发包时，可通过 EXPO_PUBLIC_GATEWAY_URL 预设网关地址，普通用户只需登录。没有证书时可以使用固定公网 IPv4 + HTTP：将地址设为 http://服务器IP:8787，并使用 build_friend_android.ps1 -AllowHttpIp 构建；流式聊天会自动使用 ws://。
 
 ### 3. 配置模型，开始聊天
 
@@ -114,7 +120,7 @@ Android 开发模拟器通常通过 http://10.0.2.2:8787 访问电脑网关；�
 3. 在“AI 陪伴专用服务”分别配置陪伴聊天与陪伴照片。
 4. 获取可用模型、选择并保存。进入 AI 陪伴即可创建或编辑角色。
 
-生产环境使用固定 HTTPS/WSS 网关。Docker 部署、反向代理和 Android 构建步骤见 [部署指南](docs/DEPLOYMENT.md)。
+当前没有证书时可以直接使用公网 IP + HTTP 部署；取得证书后再切换到 HTTPS/WSS。Docker、公网端口、Android 明文构建和后续证书升级步骤见 [部署指南](docs/DEPLOYMENT.md)。
 
 ## 项目结构
 
@@ -136,13 +142,17 @@ npm run build
 node scripts/check_release_metadata.mjs
 ~~~
 
-当前版本通过 **782 项自动化检查**：移动端 437、网关 287、脚本 58，另通过全工作区类型检查、lint 和构建。CI 会执行验证、构建以及 Android / iOS 的 Expo bundle 导出；bundle 导出不等于原生设备安装验证。
+验证请以当前提交实际运行的 `npm run verify` 和 `npm run build` 输出为准；测试数量会随代码变化，不在 README 中固定容易过期的快照数字。CI 会执行验证、构建以及 Android / iOS 的 Expo bundle 导出；bundle 导出不等于原生设备安装验证。知识库 baseline 评测使用 `npm run knowledge:evaluate`；`npm run knowledge:compare` 会对比 lexical 与 FTS5 BM25。结果为合成数据的检索层指标，不代表线上性能。
 
 欢迎通过 [Issues](https://github.com/dyhxxs/nova-chat/issues) 提交反馈，或通过 Pull Request 改进角色体验、模型兼容、界面与文档。
 
 - [使用与数据指南](docs/USABILITY_AND_SECURITY.md)
 - [陪伴、人设与模型配置](docs/COMPANION.md)
 - [架构说明](docs/ARCHITECTURE.md)
+- [企业级运行说明](docs/ENTERPRISE_READINESS.md)
+- [知识库评测](docs/EVALUATION.md)
+- [技术案例说明](docs/PORTFOLIO_CASE_STUDY.md)
+- [演示脚本](docs/DEMO_SCRIPT.md)
 - [存储迁移与升级](docs/STORAGE_MIGRATION.md)
 - [安全策略](SECURITY.md)
 

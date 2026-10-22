@@ -1,4 +1,5 @@
 import { normalizeServerUrl, toRestUrl, toWebSocketUrl } from '../lib/connection';
+import { APP_VERSION, APP_VERSION_CODE, appVersionHeaders } from '../lib/appUpdate';
 
 export type DiagnosticStep = { id: 'address' | 'gateway' | 'catalog' | 'stream'; label: string; status: 'ok' | 'warning' | 'error' | 'skipped'; detail: string; durationMs: number };
 export type DiagnosticReport = { checkedAt: number; transport: 'HTTPS' | 'HTTP' | 'invalid'; cancelled: boolean; steps: DiagnosticStep[] };
@@ -23,7 +24,7 @@ async function getJson(url: string, input: Input, authenticated: boolean) {
   input.signal?.addEventListener('abort', abort, { once: true });
   const timer = setTimeout(abort, input.timeoutMs ?? 6_000);
   try {
-    const response = await fetch(url, { method: 'GET', headers: authenticated ? { authorization: `Bearer ${input.accessToken}` } : {}, signal: controller.signal, redirect: 'error' });
+    const response = await fetch(url, { method: 'GET', headers: { ...appVersionHeaders, ...(authenticated ? { authorization: `Bearer ${input.accessToken}` } : {}) }, signal: controller.signal, redirect: 'error' });
     if (response.status === 401 || response.status === 403) throw new CheckError('auth');
     if (!response.ok) throw new CheckError('http', response.status);
     try { return await response.json() as unknown; } catch { throw new CheckError('format'); }
@@ -52,7 +53,7 @@ function checkSocket(url: string, input: Input): Promise<void> {
     input.signal?.addEventListener('abort', abort, { once: true });
     if (input.signal?.aborted) { abort(); return; }
     socket.onopen = () => {
-      try { socket.send(JSON.stringify({ type: 'hello', accessToken: input.accessToken, deviceId: input.deviceId })); }
+      try { socket.send(JSON.stringify({ type: 'hello', accessToken: input.accessToken, deviceId: input.deviceId, appVersion: APP_VERSION, appVersionCode: APP_VERSION_CODE })); }
       catch { finish(new CheckError('network')); }
     };
     socket.onmessage = (event) => {

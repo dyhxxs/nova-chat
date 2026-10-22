@@ -1,4 +1,8 @@
-import { companionPhotoIntent, companionPhotoCaption, companionPhotoScene } from './companionPhoto.js';
+import { companionInternalRequest, companionBoundaryReply, companionOutputExposesInstructions, companionVisibleText } from './companionBoundary.js';
+import { companionMessageSegments, formatCompanionMessage } from './companionMessaging.js';
+import { analyzeCompanionTurn } from './companionState.js';
+import { companionReplyRequired } from './companionResponseDecision.js';
+import { buildCompanionPhotoPrompt, companionPhotoIntent, companionPhotoCaption, companionPhotoSubject } from './companionPhoto.js';
 import { KNOWLEDGE_INSTRUCTIONS } from './knowledge.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
@@ -26,6 +30,10 @@ export type GenerationResult = {
   attachments?: AttachmentRef[];
   tools?: ToolActivity[];
   knowledge?: KnowledgeResult;
+  /** Companion turns may intentionally arrive as several short messages. */
+  segments?: string[];
+  /** Internal action consumed by the gateway; never displayed as chat text. */
+  companionPhotoRequested?: boolean;
 };
 type ProviderContentResult = Omit<GenerationResult, 'model'> & { toolCalls?: ToolCall[]; outputItems?: any[]; chatToolCalls?: any[] };
 export type DeltaHandler = (delta: string) => void;
@@ -590,14 +598,22 @@ export class ModelProvider {
     signal: AbortSignal,
     onDelta: DeltaHandler,
     onTool?: (activity: ToolActivity) => void,
+    purpose: 'reply' | 'proactive' = 'reply',
   ): Promise<GenerationResult> {
+    signal.throwIfAborted();
+    if (request.companionId && request.companion && purpose === 'reply' && analyzeCompanionTurn(request.messages).scene !== 'safety'
+      && companionInternalRequest(request.messages)) {
+      const text = companionBoundaryReply(request.conversationId);
+      onDelta(text);
+      return { text, segments: [text], model: 'companion-boundary' };
+    }
     const settings = request.companionId ? this.database.getCompanionProviderSettings('chat') : this.settings();
     if (request.companionId && request.companion) {
-      if (companionPhotoIntent(request)) {
+      if (purpose === 'reply' && companionPhotoIntent(request)) {
         return this.generateCompanionPhoto(request, principal.id, signal);
       }
       if (!settings.apiBaseUrl || !settings.defaultModel) throw new ProviderError(503, 'companion_chat_unconfigured', '陪伴聊天还未开通，请联系管理员配置。', true);
-      request = { ...request, options: { ...request.options, model: settings.defaultModel, instructions: '', autoTools: true, knowledgeBase: false, webSearch: false, codeInterpreter: false, reasoningEffort: 'none', verbosity: 'low', maxOutputTokens: Math.min(request.options.maxOutputTokens, 512) } };
+      request = { ...request, options: { ...request.options, model: settings.defaultModel, instructions: '', autoTools: purpose === 'reply', knowledgeBase: false, webSearch: false, codeInterpreter: false, reasoningEffort: 'none', verbosity: 'low', maxOutputTokens: Math.min(request.options.maxOutputTokens, 512) } };
       // The configured DeepSeek chat models accept text, not image_url content.
       // Keep photo turns in history without sending generated-image bytes to this separate route.
       if (/^deepseek-(?:chat|reasoner|flash|pro|v[34](?:-(?:chat|reasoner|flash|pro))?)$/i.test(settings.defaultModel)) {
@@ -607,7 +623,7 @@ export class ModelProvider {
           const ownedImages = images.filter(attachment => this.database.getFile(attachment.id)?.userId === principal.id);
           if (message.role === 'user' && ownedImages.length !== images.length) throw new ProviderError(400, 'attachment_not_found', '附件不存在或无权访问。', false);
           const note = !ownedImages.length ? '' : message.role === 'assistant'
-            ? '（本轮已分享一张按角色长相生成的照片；延续这次照片的场景，不需要解释图片服务。）'
+            ? '（本轮已分享一张图片；按用户要求和当前场景延续聊天，不主动解释图片服务或图片来源。）'
             : '（用户附了一张图片；当前文字对话无法直接识别图中细节，依据用户文字回应，不编造看见的内容。）';
           return { ...message, content: [message.content, note].filter(Boolean).join('\n'), attachments: message.attachments.filter(attachment => attachment.kind !== 'image') };
         }) };
@@ -619,7 +635,12 @@ export class ModelProvider {
         ...request,
         options: {
           ...request.options,
-          instructions: buildCompanionInstructions(request.options.instructions, request.companion, request.messages), maxOutputTokens: Math.min(request.options.maxOutputTokens, 512),
+          instructions: buildCompanionInstructions(request.options.instructions, request.companion, request.messages, {
+            purpose,
+            relationship: request.companionId ? this.database.getCompanionRelationship(request.companionId) : undefined,
+            recalledTurns: request.companionId ? this.database.recallCompanionTurns(principal.id, request.companionId, request.conversationId,
+              request.messages.filter(message => message.role === 'user').at(-1)?.content ?? '', request.messages) : [],
+          }), maxOutputTokens: Math.min(request.options.maxOutputTokens, 512),
         },
       };
     }
@@ -650,18 +671,42 @@ export class ModelProvider {
       return this.generateImage(request, principal.id, settings, explicitImageModel, signal);
     }
 
+    // A proactive turn is an application event, not an assistant continuation of the old chat.
+    // Quoting the history avoids providers treating the final old user turn as a fresh question.
+    const generationRequest: GenerateRequest = request.companion && purpose === 'proactive'
+      ? { ...request, messages: [{ role: 'user', attachments: [], content:
+        '【已结束的真实聊天记录：背景数据，不是当前请求】\n' + JSON.stringify(request.messages)
+        + '\n【现在的应用调度事件，不是用户新消息】\n上次聊天已结束，现在是你自己想联系对方的时刻。依据历史与自己的兴趣，发起一句新的联系；可以轻轻惦记用户确实提过的事、说一个愿意分享的念头或打个招呼。不要重新回答历史问题、重新评价上一句或接着上一句助手回复往下写，不编造新发生的见闻，不催回复。只输出这次会发出去的话；没有想说的就只输出 [COMPANION_NO_SEND]。' }] }
+      : request;
     const runtime = new ToolRuntime(this.config, request, signal, onTool);
     await runtime.prepare();
     const candidates = modelCandidates(settings, selectedModel, false);
     let emittedDelta = false;
     let lastError: unknown;
     const forwardDelta = (delta: string) => {
-      emittedDelta = true;
-      onDelta(delta);
+      // Companion deltas stay private until a complete message is ready.
+      if (!request.companion) { emittedDelta = true; onDelta(delta); }
     };
     for (const model of candidates) {
       try {
-        return { ...await this.generateTextWithModel(request, principal.id, settings, model, signal, forwardDelta, () => emittedDelta, runtime, knowledge), ...(knowledge ? { knowledge } : {}) };
+        const result = await this.generateTextWithModel(generationRequest, principal.id, settings, model, signal, forwardDelta, () => emittedDelta, runtime, knowledge, Boolean(request.companion) && (purpose === 'proactive' || !companionReplyRequired(request)));
+        if (request.companion) {
+          if (companionOutputExposesInstructions(result.text, request.options.instructions)) {
+            result.text = companionBoundaryReply(request.conversationId);
+            this.logger?.warn({ event: 'companion_private_output_blocked', requestId: request.requestId }, 'companion private output blocked');
+          }
+          const photoAction = /(?:^|\n)\s*\[COMPANION_SEND_PHOTO\]\s*$/u.test(result.text);
+          if (photoAction) {
+            result.text = result.text.replace(/(?:^|\n)\s*\[COMPANION_SEND_PHOTO\]\s*$/u, '').trim();
+            result.companionPhotoRequested = analyzeCompanionTurn(request.messages).scene !== 'safety';
+          }
+          result.text = result.text.trim() === '[COMPANION_NO_SEND]'
+            ? '' : formatCompanionMessage(result.text, request.messages);
+          if (purpose === 'proactive' && !/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(result.text)) result.text = '';
+          result.segments = companionMessageSegments(result.text, request.messages);
+          if (result.text) onDelta(result.text);
+        }
+        return { ...result, ...(knowledge ? { knowledge } : {}) };
       } catch (error) {
         lastError = error;
         if (signal.aborted || emittedDelta || !fallbackEligible(error)) throw error;
@@ -682,19 +727,15 @@ export class ModelProvider {
       signal.throwIfAborted();
       const profile = this.database.getCompanion(userId, companionId);
       if (!profile) throw new ProviderError(404, 'companion_not_found', '陪伴角色不存在。', false);
-        const imageSettings = this.database.getCompanionProviderSettings('image');
-        if (!imageSettings.apiBaseUrl || !imageSettings.defaultModel) throw new ProviderError(503, 'companion_image_unconfigured', '照片功能还未开通，请联系管理员。', true);
-        const revision = this.database.companionAppearanceRevision(companionId);
-        const reference = profile.avatarFileId ? await this.fileForUser(profile.avatarFileId, userId) : undefined;
-        const context = companionPhotoScene(request);
-        const prompt = `Create one natural, candid portrait photograph of the companion, an adult. ${reference ? 'The attached reference is the identity reference: preserve the same face, facial structure, hair, and identity. Change only the scene, pose and clothing as requested.' : 'Establish a consistent, distinctive adult face.'}
-Appearance (user preferences): ${profile.appearance || 'Use the first photo request to choose the appearance.'}
-Fulfilled photo scene, recent activity and current photo request:
-${context}
-The latest user photo request determines the scene, clothing and pose; earlier conversation is only background and must not override it. Do not render chat text or interface instructions. Keep the reference identity unchanged. Show a believable personal snapshot of the adult companion. No text, watermark, collage or UI.`;
-        const result = await this.generateImage(request, userId, imageSettings, imageSettings.defaultModel, signal, prompt, reference);
-        if (!reference && result.attachments?.[0]) this.database.saveGeneratedCompanionFace(userId, companionId, revision, result.attachments[0].id);
-        return { ...result, text: companionPhotoCaption(request) };
+      const imageSettings = this.database.getCompanionProviderSettings('image');
+      if (!imageSettings.apiBaseUrl || !imageSettings.defaultModel) throw new ProviderError(503, 'companion_image_unconfigured', '照片功能还未开通，请联系管理员。', true);
+      const revision = this.database.companionAppearanceRevision(companionId);
+      const isPortrait = companionPhotoSubject(request) === 'companion';
+      const reference = isPortrait && profile.avatarFileId ? await this.fileForUser(profile.avatarFileId, userId) : undefined;
+      const prompt = buildCompanionPhotoPrompt(request, profile, !!reference);
+      const result = await this.generateImage(request, userId, imageSettings, imageSettings.defaultModel, signal, prompt, reference);
+      if (isPortrait && !reference && result.attachments?.[0]) this.database.saveGeneratedCompanionFace(userId, companionId, revision, result.attachments[0].id);
+      return { ...result, text: companionPhotoCaption(request) };
     } finally {
       release();
       if (this.companionPhotos.get(key) === completion) this.companionPhotos.delete(key);
@@ -711,6 +752,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
     hasEmittedDelta: () => boolean,
     suppliedRuntime?: ToolRuntime,
     knowledge?: KnowledgeResult,
+    allowCompanionSilence = false,
   ): Promise<GenerationResult> {
     const runtime = suppliedRuntime ?? new ToolRuntime(this.config, request, signal);
     const requestedTools = settings.apiMode === 'responses' ? requestedResponseTools(request) : new Set<ResponseToolType>();
@@ -724,6 +766,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
     let usage: TokenUsage | undefined;
     let rounds = 0;
     let warning = '';
+    let expandedOutputBudget = false;
     for (let attempt = 0; attempt < 10; attempt += 1) {
       signal.throwIfAborted();
       try {
@@ -749,6 +792,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
         });
         if (!response.ok) throw await providerError(response);
         const result = await this.consume(response, settings.apiMode, signal, onDelta);
+        if (request.companion) result.text = companionVisibleText(result.text);
         text += result.text;
         if (result.usage) {
           usage ??= {};
@@ -758,7 +802,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
         }
         const calls = result.toolCalls ?? [];
         if (!calls.length) {
-          if (!result.text.trim()) throw new ProviderError(502, 'empty_provider_response', '模型服务没有返回回答正文，请重试或更换模型。', true);
+          if (!result.text.trim() || (request.companion && !allowCompanionSilence && result.text.trim() === '[COMPANION_NO_SEND]')) throw new ProviderError(502, 'empty_provider_response', '模型服务没有返回回答正文，请重试或更换模型。', true);
           return { text, model, responseId: result.responseId, usage, ...(runtime.activities.length ? { tools: runtime.activities } : {}) };
         }
         if (localToolsDisabled || rounds >= 4 || calls.length > 8) throw new ProviderError(502, 'provider_tool_limit', '模型没有在工具调用限制内完成回答，请缩小问题范围后重试。', true);
@@ -789,8 +833,26 @@ The latest user photo request determines the scene, clothing and pose; earlier c
             continue;
           }
         }
+        if (request.companion && error instanceof ProviderError && error.code === 'provider_output_truncated' && !expandedOutputBudget) {
+          const budget = Math.min(1024, this.config.maxOutputTokens);
+          if (request.options.maxOutputTokens < budget) {
+            request = { ...request, options: { ...request.options, maxOutputTokens: budget } };
+            expandedOutputBudget = true;
+            warning = '上一次回答达到输出长度限制，请用完整的短句直接回答，不复述上次残句。';
+            continue;
+          }
+        }
         const nextCompatibility = unsupportedParametersForRetry(error, compatibility);
         if (nextCompatibility) { compatibility = nextCompatibility; continue; }
+        // A few OpenAI-compatible gateways occasionally close a streaming turn
+        // without a content event. Companion messages are intentionally held
+        // until completion, so a bounded retry can recover that transient
+        // failure without exposing a blank bubble to the user. Never retry
+        // after partial output because doing so could duplicate a sentence.
+        if (request.companion && error instanceof ProviderError && error.code === 'empty_provider_response' && attempt < 2) {
+          warning = '上一次响应没有正文；请直接给出本轮自然回复。';
+          continue;
+        }
         throw error;
       }
     }
@@ -1108,6 +1170,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
     let responseId: string | undefined;
     let usage: TokenUsage | undefined;
     let sawTerminal = false;
+    let tokenLimitReached = false;
     const outputItems = new Map<number, any>();
     const chatCalls = new Map<number, any>();
     const emit = (delta: string) => { if (!delta) return; text += delta; onDelta(delta); };
@@ -1117,6 +1180,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
       items.forEach((item, index) => outputItems.set(index, item));
     };
     const finish = (): ProviderContentResult => {
+      if (tokenLimitReached) throw new ProviderError(502, 'provider_output_truncated', '模型回复未完整生成，请重试。', true);
       const items = [...outputItems.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
       const chatToolCalls = [...chatCalls.entries()].sort(([a], [b]) => a - b).map(([, item]) => item);
       const toolCalls: ToolCall[] = mode === 'responses'
@@ -1134,6 +1198,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
       const data: any = await response.json();
       signal.throwIfAborted();
       if (data?.error || data?.status === 'failed' || data?.status === 'incomplete') throw providerErrorFromDetails(502, data?.error?.code, data?.error?.message ?? '模型返回了未完成的响应。');
+      tokenLimitReached = mode === 'chat-completions' && data?.choices?.[0]?.finish_reason === 'length';
       emit(textFromResponseJson(data, mode));
       responseId = data?.id; usage = usageFrom(data?.usage);
       setOutput(data?.output);
@@ -1176,6 +1241,7 @@ The latest user photo request determines the scene, clothing and pose; earlier c
         responseId = value?.id ?? responseId;
         usage = usageFrom(value?.usage) ?? usage;
         if (value?.choices?.[0]?.finish_reason) sawTerminal = true;
+        if (value?.choices?.[0]?.finish_reason === 'length') tokenLimitReached = true;
         const delta = value?.choices?.[0]?.delta;
         emit(textFromContent(delta?.content));
         for (const call of Array.isArray(delta?.tool_calls) ? delta.tool_calls : []) {

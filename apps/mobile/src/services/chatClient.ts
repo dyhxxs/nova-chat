@@ -1,6 +1,6 @@
 import { knowledgeResultSchema } from '@nova-chat/protocol';
 import { gatewayHttpErrorMessage } from '../lib/gatewayHttpError';
-import Constants from 'expo-constants';
+import { APP_VERSION, APP_VERSION_CODE, appVersionHeaders, reportUpgradeRequired } from '../lib/appUpdate';
 import type { GenerateRequest, ServerSocketMessage, ToolActivity } from '@nova-chat/protocol';
 import { normalizeServerUrl, toRestUrl, toWebSocketUrl } from '../lib/connection';
 import { cancelGenerationJob, getGenerationJob } from './gatewayApiClient';
@@ -147,6 +147,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         responseId: job.responseId,
         usage: job.usage,
         attachments: job.attachments,
+        segments: job.segments,
         tools: job.tools,
         knowledge: knowledgeResultSchema.safeParse(job.knowledge).data,
       });
@@ -221,6 +222,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          ...appVersionHeaders,
           ...(options.accessToken ? { authorization: `Bearer ${options.accessToken}` } : {}),
         },
         body: JSON.stringify(options.request),
@@ -228,6 +230,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
       });
       const data = await response.json().catch(() => undefined);
       if (!response.ok) {
+        reportUpgradeRequired(options.serverUrl, data?.error ?? {});
         fail(errorFromResponse(response.status, data));
         return;
       }
@@ -246,6 +249,7 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         responseId: data.responseId,
         usage: data.usage,
         attachments: Array.isArray(data.attachments) ? data.attachments : undefined,
+        segments: Array.isArray(data.segments) ? data.segments : undefined,
         tools: Array.isArray(data.tools) ? data.tools : undefined,
         knowledge: knowledgeResultSchema.safeParse(data.knowledge).data,
       });
@@ -271,7 +275,8 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         type: 'hello',
         accessToken: options.accessToken,
         deviceId: options.request.deviceId,
-        appVersion: Constants.expoConfig?.version ?? 'development',
+        appVersion: APP_VERSION,
+        appVersionCode: APP_VERSION_CODE,
       }));
     };
 
@@ -314,7 +319,10 @@ function startGatewayGeneration(options: StartOptions): GenerationController {
         options.handlers.onCancelled();
         return;
       }
-      if (message.type === 'error' && (!message.requestId || message.requestId === options.request.requestId)) fail(message);
+      if (message.type === 'error' && (!message.requestId || message.requestId === options.request.requestId)) {
+        reportUpgradeRequired(options.serverUrl, message);
+        fail(message);
+      }
     };
 
     socket.onerror = () => {
@@ -439,8 +447,9 @@ export function resumeGeneration(options: ResumeOptions): GenerationController {
           responseId: job.responseId,
           usage: job.usage,
           attachments: job.attachments,
-        tools: job.tools,
-        knowledge: knowledgeResultSchema.safeParse(job.knowledge).data,
+          segments: job.segments,
+          tools: job.tools,
+          knowledge: knowledgeResultSchema.safeParse(job.knowledge).data,
         });
         return;
       }

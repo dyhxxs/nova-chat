@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import { currentAppVersionHeaders } from './app_version.mjs';
 import { BlockList, isIP } from 'node:net';
 
 // Public IP SAN certificates are valid release targets. Keep non-public IPs blocked.
@@ -26,13 +27,15 @@ export async function readGatewayJson(response) {
 }
 
 
-export function validateFriendGateway(value, { allowTemporary = false } = {}) {
+export function validateFriendGateway(value, { allowTemporary = false, allowHttpIp = false } = {}) {
   let url;
-  try { url = new URL(value); } catch { throw new Error('必须提供有效的 HTTPS 网关地址。'); }
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
-    throw new Error('分享版本必须使用 HTTPS 根地址，不能包含账号、路径、查询参数或片段。');
-  }
+  try { url = new URL(value); } catch { throw new Error('必须提供有效的网关地址。'); }
   const host = url.hostname.toLowerCase();
+  const isPublicIpv4 = isIP(host) === 4 && !nonPublicIpv4.check(host, 'ipv4');
+  const httpIpAllowed = allowHttpIp && url.protocol === 'http:' && isPublicIpv4;
+  if ((url.protocol !== 'https:' && !httpIpAllowed) || url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+    throw new Error(httpIpAllowed ? '网关地址不能包含账号、路径、查询参数或片段。' : '分享版本默认必须使用 HTTPS 根地址；如使用公网 IPv4 的 HTTP 部署，必须显式启用 HTTP IP 验证。');
+  }
   if (host === 'localhost' || !host.includes('.') || host.endsWith('.local') || host.endsWith('.localhost')
     || host.endsWith('.test') || host.endsWith('.invalid') || host.endsWith('.example')
     || (isIP(host) === 4 && nonPublicIpv4.check(host, 'ipv4')) || host.includes(':')) {
@@ -44,10 +47,10 @@ export function validateFriendGateway(value, { allowTemporary = false } = {}) {
   return url.origin;
 }
 
-export async function checkGateway(value, { allowTemporary = false, requireRegistration = true, fetchImpl = fetch } = {}) {
-  const base = validateFriendGateway(value, { allowTemporary });
+export async function checkGateway(value, { allowTemporary = false, allowHttpIp = false, requireRegistration = true, fetchImpl = fetch } = {}) {
+  const base = validateFriendGateway(value, { allowTemporary, allowHttpIp });
   async function get(route) {
-    const response = await fetchImpl(base + route, { signal: AbortSignal.timeout(15_000), redirect: 'error' });
+    const response = await fetchImpl(base + route, { signal: AbortSignal.timeout(15_000), redirect: 'error', headers: currentAppVersionHeaders });
     if (!response.ok) throw new Error(`${route} 返回 HTTP ${response.status}；请先恢复网关/隧道，禁止分发不可用安装包。`);
     try { return await readGatewayJson(response); } catch { throw new Error(`${route} 没有返回大小受限的有效 JSON，可能连接到了代理错误页面。`); }
   }
@@ -68,7 +71,10 @@ export async function checkGateway(value, { allowTemporary = false, requireRegis
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const result = await checkGateway(process.argv[2], { allowTemporary: process.argv.includes('--allow-temporary'), requireRegistration: !process.argv.includes('--existing-accounts-only') });
+    const args = process.argv.slice(2);
+    const known = new Set(['--allow-temporary', '--allow-http-ip', '--existing-accounts-only']);
+    if (!args[0] || args.slice(1).some((arg) => !known.has(arg))) throw new Error('参数无效。');
+    const result = await checkGateway(args[0], { allowTemporary: args.includes('--allow-temporary'), allowHttpIp: args.includes('--allow-http-ip'), requireRegistration: !args.includes('--existing-accounts-only') });
     console.log(JSON.stringify(result, null, 2));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

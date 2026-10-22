@@ -36,8 +36,11 @@ export function retrievalTerms(query: string): string[] {
   return knowledgeTokens(query.replace(/请问|告诉我|根据资料|资料库|帮我查一下|是什么|有哪些/g, ' ')).filter(term => !stopTerms.has(term)).slice(0, 32);
 }
 
+export const KNOWLEDGE_RETRIEVAL_STRATEGIES = ['lexical', 'bm25'] as const;
+export type KnowledgeRetrievalStrategy = typeof KNOWLEDGE_RETRIEVAL_STRATEGIES[number];
+
 export class KnowledgeStore {
-  constructor(private readonly db: DatabaseSync) {
+  constructor(private readonly db: DatabaseSync, private readonly defaultStrategy: KnowledgeRetrievalStrategy = 'lexical') {
     db.exec(`
       CREATE TABLE IF NOT EXISTS knowledge_documents (
         id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -100,23 +103,34 @@ export class KnowledgeStore {
     const result = this.db.prepare('DELETE FROM knowledge_documents WHERE user_id=? AND id=?').run(userId, id);
     if (!result.changes) throw new KnowledgeError(404, 'knowledge_not_found', '资料不存在或不属于当前账户。');
   }
-  search(userId: string, input: string): KnowledgeResult {
+  search(userId: string, input: string, strategy: KnowledgeRetrievalStrategy = this.defaultStrategy): KnowledgeResult {
     const query = input.trim().slice(0, 200);
     const terms = retrievalTerms(query);
     if (!terms.length) return { query, sources: [] };
     // FTS syntax is never taken from the user: quote each normalized token.
     const expression = terms.map(term => '"' + term.replaceAll('"', '""') + '"').join(' OR ');
-    const rows = this.db.prepare(`SELECT k.document_id,k.ordinal,k.content,d.title,d.updated_at
-      FROM knowledge_index k JOIN knowledge_documents d ON d.id=k.document_id AND d.user_id=k.user_id
-      WHERE knowledge_index MATCH ? AND k.user_id=? AND d.user_id=? ORDER BY k.rowid LIMIT 12000`)
-      .all(expression, userId, userId) as { document_id: string; ordinal: number; content: string; title: string; updated_at: number }[];
+    const rows = (strategy === 'bm25'
+      ? this.db.prepare(`SELECT k.document_id,k.ordinal,k.content,d.title,d.updated_at,bm25(knowledge_index) AS bm25_score
+        FROM knowledge_index k JOIN knowledge_documents d ON d.id=k.document_id AND d.user_id=k.user_id
+        WHERE knowledge_index MATCH ? AND k.user_id=? AND d.user_id=? ORDER BY bm25_score ASC,k.rowid ASC LIMIT 12000`)
+      : this.db.prepare(`SELECT k.document_id,k.ordinal,k.content,d.title,d.updated_at
+        FROM knowledge_index k JOIN knowledge_documents d ON d.id=k.document_id AND d.user_id=k.user_id
+        WHERE knowledge_index MATCH ? AND k.user_id=? AND d.user_id=? ORDER BY k.rowid LIMIT 12000`))
+      .all(expression, userId, userId) as { document_id: string; ordinal: number; content: string; title: string; updated_at: number; bm25_score?: number }[];
     const ranked = rows.map(row => {
       const tokens = new Set(knowledgeTokens(row.content));
       const title = new Set(knowledgeTokens(row.title));
       const matches = terms.filter(term => tokens.has(term) || title.has(term));
-      return { row, matches: matches.length, score: matches.reduce((n, term) => n + (tokens.has(term) ? 1 : 0) + (title.has(term) ? 2 : 0), 0) };
+      return {
+        row,
+        matches: matches.length,
+        lexicalScore: matches.reduce((n, term) => n + (tokens.has(term) ? 1 : 0) + (title.has(term) ? 2 : 0), 0),
+        bm25Score: row.bm25_score ?? 0,
+      };
     }).filter(item => item.matches >= Math.min(2, terms.length))
-      .sort((a, b) => b.score - a.score || b.row.updated_at - a.row.updated_at || a.row.document_id.localeCompare(b.row.document_id) || a.row.ordinal - b.row.ordinal);
+      .sort((a, b) => strategy === 'bm25'
+        ? a.bm25Score - b.bm25Score || b.matches - a.matches || b.lexicalScore - a.lexicalScore || b.row.updated_at - a.row.updated_at || a.row.document_id.localeCompare(b.row.document_id) || a.row.ordinal - b.row.ordinal
+        : b.lexicalScore - a.lexicalScore || b.row.updated_at - a.row.updated_at || a.row.document_id.localeCompare(b.row.document_id) || a.row.ordinal - b.row.ordinal);
     const perDocument = new Map<string, number>();
     const sources: KnowledgeResult['sources'] = [];
     for (const { row } of ranked) {

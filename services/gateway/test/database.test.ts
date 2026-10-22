@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { COMPANION_DEFAULT_PERSONALITY, COMPANION_DEFAULT_SPEAKING_STYLE } from '@nova-chat/protocol';
+import { COMPANION_DEFAULT_PERSONALITY, COMPANION_DEFAULT_SPEAKING_STYLE, COMPANION_DEFAULT_PERSONA_PROMPT } from '@nova-chat/protocol';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -122,10 +122,10 @@ describe('AppDatabase', () => {
 
     const firstCompanions = database.listCompanions(first.id);
     const secondCompanions = database.listCompanions(second.id);
-    expect(firstCompanions).toHaveLength(1);
-    expect(secondCompanions).toHaveLength(1);
-    const firstCompanion = firstCompanions[0]!;
-    const secondCompanion = secondCompanions[0]!;
+    expect(firstCompanions).toHaveLength(2);
+    expect(secondCompanions).toHaveLength(2);
+    const firstCompanion = firstCompanions.find(p => p.name === 'Lumi')!;
+    const secondCompanion = secondCompanions.find(p => p.name === 'Lumi')!;
     expect(firstCompanion).toMatchObject({ name: 'Lumi', templateId: 'cyber-companion-v1' });
     expect(firstCompanion.id).not.toBe(secondCompanion.id);
     expect(database.getCompanion(second.id, firstCompanion.id)).toBeUndefined();
@@ -150,7 +150,7 @@ describe('AppDatabase', () => {
     expect(database.getCompanion(first.id, firstCompanion.id)).toBeUndefined();
     const recreated = database.listCompanions(first.id);
     expect(recreated).toHaveLength(1);
-    expect(recreated[0]!.name).toBe('Lumi');
+    expect(recreated[0]!.name).toBe('沈知意');
   });
 
   it('encrypts provider keys at rest and returns only secret-free configuration status', async () => {
@@ -184,3 +184,89 @@ describe('AppDatabase', () => {
 });
 
 
+
+
+describe('persisted persona prompts and built-in installation', () => {
+  it('installs Shen once, preserves user edits and does not recreate her after deletion', async () => {
+    const { database, dataDir } = await createDatabase();
+    const user = database.createUser({ email: 'templates@qa.local', password: 'temporary-test-password', displayName: 'QA' });
+    const first = database.listCompanions(user.id);
+    const shen = first.find(profile => profile.templateId === 'shen-zhiyi-v1')!;
+    expect(shen.personaPrompt).toContain('【炸毛机制】');
+    expect(shen.personaPrompt).toContain('【示范：下意识露软】');
+    expect(first.find(profile => profile.name === 'Lumi')?.personaPrompt).toBe(COMPANION_DEFAULT_PERSONA_PROMPT);
+    database.updateCompanion(user.id, shen.id, { name: '知意', personaPrompt: '你是知意。用户修改的完整人设。' });
+    expect(database.listCompanions(user.id).find(profile => profile.id === shen.id)?.personaPrompt).toBe('你是知意。用户修改的完整人设。');
+    expect(database.listCompanions(user.id)).toHaveLength(2);
+    database.close(); databases.splice(databases.indexOf(database), 1);
+    const restarted = new AppDatabase(loadConfig({ NODE_ENV: 'test', DATA_DIR: dataDir, SERVER_MASTER_KEY: 'database-test-master-key-that-is-never-used-in-production' }));
+    databases.push(restarted);
+    expect(restarted.listCompanions(user.id).find(profile => profile.id === shen.id)?.name).toBe('知意');
+    expect(restarted.deleteCompanion(user.id, shen.id)).toBe(true);
+    expect(restarted.listCompanions(user.id)).toHaveLength(1);
+    expect(restarted.listCompanions(user.id).some(profile => profile.templateId === 'shen-zhiyi-v1')).toBe(false);
+  });
+  it('keeps a full multiline prompt through partial patches and separates it from custom legacy text', async () => {
+    const { database } = await createDatabase();
+    const user = database.createUser({ email: 'prompt@qa.local', password: 'temporary-test-password', displayName: 'QA' });
+    const personaPrompt = '你是阿川。\n【性格】\n35岁烘焙师，直接、少话。\n【示范】\n用户：忙吗？\n阿川：刚出炉，等会儿。';
+    const profile = database.createCompanion(user.id, { name: '阿川', personality: ['35岁烘焙师'], speakingStyle: ['直接'], personaPrompt });
+    expect(profile.personaPrompt).toBe(personaPrompt);
+    expect(database.updateCompanion(user.id, profile.id, { name: '川', userName: '小李' })?.personaPrompt).toBe(personaPrompt);
+    expect(database.updateCompanion(user.id, profile.id, { personaPrompt: '' })?.personaPrompt).toBe('');
+    const custom = database.createCompanion(user.id, { personality: ['40岁木匠'], speakingStyle: ['只用粤语'] });
+    expect(custom.personaPrompt).toBe('');
+  });
+
+  it('stores attachment paths relative to uploads and returns portable absolute paths', async () => {
+    const { database, dataDir } = await createDatabase();
+    const user = database.createUser({ email: 'paths@qa.local', password: 'temporary-test-password', displayName: 'QA' });
+    const fileId = 'portable-file';
+    const absolutePath = path.join(database.uploadsDir, `${fileId}.txt`);
+    await import('node:fs/promises').then(({ writeFile }) => writeFile(absolutePath, 'portable'));
+    const stored = database.createFile({ id: fileId, userId: user.id, name: 'file.txt', mimeType: 'text/plain', size: 8, kind: 'document', storagePath: absolutePath });
+    expect(stored.storagePath).toBe(absolutePath);
+    expect(database.getFile(fileId)?.storagePath).toBe(absolutePath);
+
+    const raw = new DatabaseSync(path.join(dataDir, 'nova-chat.sqlite'));
+    try {
+      expect(raw.prepare('SELECT storage_path FROM files WHERE id=?').get(fileId)).toEqual({ storage_path: `${fileId}.txt` });
+      expect(raw.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 });
+    } finally { raw.close(); }
+  });
+
+  it('migrates legacy absolute attachment paths when reopening a database', async () => {
+    const { database, dataDir } = await createDatabase();
+    const user = database.createUser({ email: 'legacy-paths@qa.local', password: 'temporary-test-password', displayName: 'QA' });
+    const fileId = 'legacy-file';
+    const absolutePath = path.join(database.uploadsDir, `${fileId}.txt`);
+    await import('node:fs/promises').then(({ writeFile }) => writeFile(absolutePath, 'legacy'));
+    database.createFile({ id: fileId, userId: user.id, name: 'legacy.txt', mimeType: 'text/plain', size: 6, kind: 'document', storagePath: absolutePath });
+    const raw = new DatabaseSync(path.join(dataDir, 'nova-chat.sqlite'));
+    raw.prepare('UPDATE files SET storage_path=? WHERE id=?').run(absolutePath, fileId);
+    raw.exec('PRAGMA user_version=0');
+    raw.close();
+    database.close();
+    databases.splice(databases.indexOf(database), 1);
+
+    const reopened = new AppDatabase(loadConfig({ NODE_ENV: 'test', DATA_DIR: dataDir, SERVER_MASTER_KEY: 'database-test-master-key-that-is-never-used-in-production' }));
+    databases.push(reopened);
+    expect(reopened.getFile(fileId)?.storagePath).toBe(absolutePath);
+    const migrated = new DatabaseSync(path.join(dataDir, 'nova-chat.sqlite'));
+    try {
+      expect(migrated.prepare('SELECT storage_path FROM files WHERE id=?').get(fileId)).toEqual({ storage_path: `${fileId}.txt` });
+      expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 1 });
+    } finally { migrated.close(); }
+  });
+
+  it('rejects a database schema newer than the gateway before attempting migrations', async () => {
+    const { database, dataDir } = await createDatabase();
+    database.close();
+    databases.splice(databases.indexOf(database), 1);
+    const raw = new DatabaseSync(path.join(dataDir, 'nova-chat.sqlite'));
+    raw.exec('PRAGMA user_version=99');
+    raw.close();
+    expect(() => new AppDatabase(loadConfig({ NODE_ENV: 'test', DATA_DIR: dataDir, SERVER_MASTER_KEY: 'database-test-master-key-that-is-never-used-in-production' })))
+      .toThrow('newer than this Gateway supports');
+  });
+});

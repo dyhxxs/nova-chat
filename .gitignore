@@ -30,3 +30,15 @@ artifacts/*
 
 # Temporary local GitHub credential handoff (never commit)
 .gh-token.txt
+
+# Local relay credentials
+/key.txt
+
+# Local emulator screenshots and UI hierarchy dumps
+/artifacts_mumu*.png
+/mumu_window*.xml
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+*.pyo

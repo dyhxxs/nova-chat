@@ -2,7 +2,7 @@
   "expo": {
     "name": "Nova Chat",
     "slug": "nova-chat",
-    "version": "1.1.27",
+    "version": "1.1.31",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -16,7 +16,7 @@
           "NSAllowsLocalNetworking": true
         }
       },
-      "buildNumber": "29"
+      "buildNumber": "33"
     },
     "android": {
       "package": "com.novachat.mobile",
@@ -32,7 +32,7 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
-      "versionCode": 29,
+      "versionCode": 33,
       "softwareKeyboardLayoutMode": "resize",
       "allowBackup": false
     },
@@ -58,7 +58,7 @@
         {
           "photosPermission": "允许 Nova 访问你的照片，以便把图片作为对话附件发送。",
           "cameraPermission": "允许 Nova 使用相机，以便拍照提问。",
-          "microphonePermission": false
+          "microphonePermission": "允许 Nova 使用麦克风，以便录制并发送语音消息。"
         }
       ],
       [
@@ -70,7 +70,21 @@
         }
       ],
       "expo-sharing",
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "允许 Nova 使用麦克风，以便录制并发送语音消息。",
+          "enableBackgroundRecording": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#386757"
+        }
+      ]
     ]
   }
 }

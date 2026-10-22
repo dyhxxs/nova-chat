@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$GatewayUrl,
   [switch]$AllowTemporaryGateway,
+  [switch]$AllowHttpIp,
   [switch]$OfflineBuild,
   [switch]$ExistingAccountsOnly
 )
@@ -30,6 +31,7 @@ try {
   $checker = Join-Path $PSScriptRoot 'check_gateway.mjs'
   $checkArgs = @($checker, $GatewayUrl)
   if ($AllowTemporaryGateway) { $checkArgs += '--allow-temporary' }
+  if ($AllowHttpIp) { $checkArgs += '--allow-http-ip' }
   if ($ExistingAccountsOnly) { $checkArgs += '--existing-accounts-only' }
   $gatewayCheck = & node @checkArgs
   if ($LASTEXITCODE -ne 0) { throw '网关发布前检查失败。' }
@@ -42,11 +44,16 @@ try {
   Write-Output ($gatewayCheck -join "`n")
   $chatCheckArgs = @((Join-Path $PSScriptRoot 'check_gateway_chat.mjs'), $verifiedGatewayUrl)
   if ($AllowTemporaryGateway) { $chatCheckArgs += '--allow-temporary' }
+  if ($AllowHttpIp) { $chatCheckArgs += '--allow-http-ip' }
   if ($ExistingAccountsOnly) { $chatCheckArgs += '--existing-accounts-only' }
   if ([string]::IsNullOrWhiteSpace($releaseSessionToken)) { throw '缺少专用发布验证会话 NOVA_RELEASE_SESSION_TOKEN；健康检查不等于聊天可用，禁止跳过真实聊天验收。' }
   Invoke-ReleaseChatCheck -Stage '构建前'
   $env:EXPO_PUBLIC_GATEWAY_URL = $verifiedGatewayUrl
-  $env:ALLOW_CLEARTEXT = 'false'
+  $gatewayUri = [Uri]$verifiedGatewayUrl
+  $usesCleartext = $gatewayUri.Scheme -eq 'http'
+  if ($usesCleartext -and -not $AllowHttpIp) { throw 'HTTP 公网 IP 构建必须显式指定 -AllowHttpIp。' }
+  $env:ALLOW_CLEARTEXT = if ($usesCleartext) { 'true' } else { 'false' }
+  if ($usesCleartext) { Write-Warning '当前构建使用公网 IP + HTTP；Android/iOS 明文网络已显式开启，Session 会以明文传输。' }
   if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = 'D:\Android\Sdk' }
   if (-not $env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME }
   if (-not (Test-Path -LiteralPath $env:ANDROID_HOME)) { throw '缺少 Android SDK，请设置 ANDROID_HOME。' }
@@ -80,13 +87,19 @@ try {
   if (-not $badging.Contains("versionName='$version'") -or -not $badging.Contains("versionCode='$versionCode'")) { throw 'APK 版本号不正确。' }
   if (-not $badging.Contains("native-code: 'arm64-v8a'")) { throw 'APK 架构不正确。' }
   $manifest = (& $aapt dump xmltree $source AndroidManifest.xml) -join "`n"
-  if ($manifest -match 'usesCleartextTraffic[^\r\n]*0xffffffff') { throw '公网包不得允许明文 HTTP。' }
+  if ($usesCleartext) {
+    if ($manifest -notmatch 'usesCleartextTraffic[^\r\n]*0xffffffff') { throw 'HTTP IP 包未开启 Android 明文网络。' }
+  } elseif ($manifest -match 'usesCleartextTraffic[^\r\n]*0xffffffff') {
+    throw 'HTTPS 包不得允许明文 HTTP。'
+  }
   if ($manifest -match 'android:debuggable[^\r\n]*0xffffffff') { throw '分享包不得开启调试。' }
   $permissions = (& $aapt dump permissions $source) -join "`n"
-  if (-not $permissions.Contains('android.permission.INTERNET') -or -not $permissions.Contains('android.permission.CAMERA') -or $permissions.Contains('android.permission.RECORD_AUDIO')) { throw 'APK 权限验证失败。' }
+  if (-not $permissions.Contains('android.permission.INTERNET') -or -not $permissions.Contains('android.permission.CAMERA') -or -not $permissions.Contains('android.permission.RECORD_AUDIO')) { throw 'APK 权限验证失败：当前版本需要 INTERNET、CAMERA、RECORD_AUDIO。' }
   & $signer verify $source
   if ($LASTEXITCODE -ne 0) { throw 'APK 签名验证失败。' }
-  & node (Join-Path $PSScriptRoot 'check_apk_gateway.mjs') $source $verifiedGatewayUrl
+  $apkGatewayArgs = @((Join-Path $PSScriptRoot 'check_apk_gateway.mjs'), $source, $verifiedGatewayUrl)
+  if ($AllowHttpIp) { $apkGatewayArgs += '--allow-http-ip' }
+  & node @apkGatewayArgs
   if ($LASTEXITCODE -ne 0) { throw 'APK 内置网关与本次发布地址不一致。' }
   & (Join-Path $tools.FullName 'zipalign.exe') -c -P 16 4 $source
   if ($LASTEXITCODE -ne 0) { throw 'APK 对齐验证失败。' }
