@@ -57,7 +57,7 @@ describe('voice upload', () => {
       uploadType: 'multipart',
       fieldName: 'file',
       mimeType: 'audio/mp4',
-      headers: expect.objectContaining({ authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.31', 'x-nova-app-version-code': '33' }),
+      headers: expect.objectContaining({ authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34' }),
       sessionType: 'foreground',
     }));
   });

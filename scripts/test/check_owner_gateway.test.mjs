@@ -24,8 +24,8 @@ test('owner test does not trust remote metadata or suppress TLS failures', async
 
 test('owner checks send the current client version through the app upgrade gate', async () => {
   const result = await checkOwnerGateway(address, { fetchImpl: async (url, options) => {
-    assert.equal(options.headers['x-nova-app-version'], '1.1.31');
-    assert.equal(options.headers['x-nova-app-version-code'], '33');
+    assert.equal(options.headers['x-nova-app-version'], '1.1.32');
+    assert.equal(options.headers['x-nova-app-version-code'], '34');
     return mocked()(url);
   } });
   assert.equal(result.audience, 'server-owner-test');

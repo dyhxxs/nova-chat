@@ -80,7 +80,7 @@ const wsResult = await new Promise((resolve, reject) => {
   const socket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/chat/stream');
   let text = '';
   const timer = setTimeout(() => { socket.terminate(); reject(new Error('websocket timeout')); }, 5000);
-  socket.on('open', () => socket.send(JSON.stringify({ type: 'hello', accessToken: userToken, deviceId: 'e2e-user-device', appVersion: '1.1.31', appVersionCode: 33 })));
+  socket.on('open', () => socket.send(JSON.stringify({ type: 'hello', accessToken: userToken, deviceId: 'e2e-user-device', appVersion: '1.1.32', appVersionCode: 34 })));
   socket.on('message', (raw) => {
     const message = JSON.parse(raw.toString());
     if (message.type === 'ready') socket.send(JSON.stringify({ type: 'start', payload: wsPayload }));
