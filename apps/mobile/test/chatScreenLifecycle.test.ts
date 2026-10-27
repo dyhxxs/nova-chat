@@ -20,6 +20,7 @@ vi.mock('../src/components/ThemedText', () => ({ ThemedText: 'Text', ThemedTextI
 vi.mock('../src/components/ConversationForkDialog', () => ({ ConversationForkDialog: () => null }));
 vi.mock('../src/components/SpeechControls', () => ({ SpeechControls: () => null }));
 vi.mock('../src/components/ChatOptionsModal', () => ({ ChatOptionsModal: () => null }));
+vi.mock('../src/components/ChatRecordsSheet', () => ({ ChatRecordsSheet: () => null }));
 vi.mock('../src/components/CompanionAvatar', () => ({ CompanionAvatar: () => null }));
 vi.mock('../src/components/EmptyState', () => ({ EmptyState: () => null }));
 vi.mock('../src/components/IconButton', () => ({ IconButton: () => null }));
@@ -86,7 +87,7 @@ describe('terminal, retry and recovery ownership', () => {
  it('edits a failed photo into the draft without resending or removing history',async()=>{
   await mount();await act(async()=>{await mocks.composer.onSend('发张你在看书的照片');});
   await act(async()=>{mocks.start.mock.calls[0]![0].handlers.onError({code:'provider_content_rejected',message:'图片服务未接受这次描述',retryable:false});});
-  const bubble=root!.root.findByType('FlatList' as any).props.renderItem({item:assistant()});
+  const bubble=root!.root.findByType('FlatList' as any).props.renderItem({ item: { type: 'message', key: assistant().id, message: assistant() } });
   expect(bubble.props.onRetry).toBeUndefined();
   await act(async()=>{bubble.props.onEditRequest();});
   expect(mocks.composer.text).toBe('发张你在看书的照片');
@@ -95,7 +96,7 @@ describe('terminal, retry and recovery ownership', () => {
  it('keeps an unsent draft when editing an earlier failed request',async()=>{
   await mount();await act(async()=>{await mocks.composer.onSend('发张照片');});
   await act(async()=>{mocks.start.mock.calls[0]![0].handlers.onError({code:'provider_content_rejected',message:'未通过审核',retryable:false});useAppStore.getState().setConversationDraft(conversation().id,'我还没发送的新消息');});
-  const bubble=root!.root.findByType('FlatList' as any).props.renderItem({item:assistant()});
+  const bubble=root!.root.findByType('FlatList' as any).props.renderItem({ item: { type: 'message', key: assistant().id, message: assistant() } });
   await act(async()=>{bubble.props.onEditRequest();});
   expect(mocks.composer.text).toBe('我还没发送的新消息');expect(mocks.start).toHaveBeenCalledOnce();
  });
@@ -138,7 +139,7 @@ describe('retry and connection scope changes', () => {
   const previous = mocks.start.mock.calls[0]![0];
   await act(async () => { previous.handlers.onError({ code: 'network_error', message: 'synthetic', retryable: true }); });
   const list = root!.root.findByType('FlatList' as any);
-  const bubble = list.props.renderItem({ item: assistant() });
+  const bubble = list.props.renderItem({ item: { type: 'message', key: assistant().id, message: assistant() } });
   await act(async () => { bubble.props.onRetry(); });
   expect(mocks.start).toHaveBeenCalledTimes(2);
   expect(mocks.start.mock.calls[1]![0].request.requestId).not.toBe(previous.request.requestId);

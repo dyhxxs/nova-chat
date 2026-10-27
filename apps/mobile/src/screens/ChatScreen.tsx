@@ -23,7 +23,9 @@ import { Composer } from '../components/Composer';
 import { EmptyState } from '../components/EmptyState';
 import { IconButton } from '../components/IconButton';
 import { MessageBubble } from '../components/MessageBubble';
+import { ChatRecordsSheet } from '../components/ChatRecordsSheet';
 import { buildConversationContext } from '../lib/conversationContext';
+import { buildChatTimeline, timelineDividerIndex, timelineMessageIndex, type ChatTimelineItem } from '../lib/chatTimeline';
 import { uploadProgressPercent } from '../lib/uploadProgress';
 import { friendlyNetworkError } from '../lib/errorMessage';
 import { createId } from '../lib/id';
@@ -109,6 +111,7 @@ export function ChatScreen({ navigation }: Props) {
   const [availableModels, setAvailableModels] = useState<string[]>(() => (settings.model.trim() ? [settings.model.trim()] : []));
   const [toolStatus, setToolStatus] = useState<Record<string, string>>({});
   const [optionsVisible, setOptionsVisible] = useState(false);
+  const [recordsVisible, setRecordsVisible] = useState(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const accessToken = useAppStore((state) => state.accessToken);
   const currentUser = useAppStore((state) => state.user);
@@ -171,6 +174,10 @@ export function ChatScreen({ navigation }: Props) {
   const conversation = useMemo(
     () => conversations.find((item) => item.id === activeConversationId) ?? conversations[0],
     [conversations, activeConversationId],
+  );
+  const timeline = useMemo<ChatTimelineItem[]>(
+    () => buildChatTimeline(conversation?.messages ?? []),
+    [conversation?.messages],
   );
   useEffect(() => {
     const markRead = () => {
@@ -282,6 +289,7 @@ export function ChatScreen({ navigation }: Props) {
       headerLeft: () => <IconButton name={companion ? "chevron-back" : "menu-outline"} accessibilityLabel={companion ? "返回人设对话列表" : "打开对话历史"} onPress={() => { if (companion && conversation?.companionId) navigation.navigate('CompanionConversations', { companionId: conversation.companionId, companionName: companionProfile?.name || conversation.companionName || 'TA' }); else navigation.navigate('History'); }} />,
       headerRight: () => (
         <View style={styles.headerActions}>
+          <IconButton name="search-outline" accessibilityLabel="搜索聊天记录" onPress={() => { Keyboard.dismiss(); setRecordsVisible(true); }} />
           <IconButton name="add-outline" accessibilityLabel="新建对话" onPress={() => { if (companion && conversation?.companionId) useAppStore.getState().newCompanionConversation(conversation.companionId, companionProfile?.name || conversation.companionName || 'TA'); else newConversation(); void Haptics.selectionAsync(); }} />
           <IconButton name={companion ? "person-outline" : "heart-outline"} accessibilityLabel={companion ? "角色与长相设置" : "打开 AI 陪伴"} onPress={() => navigation.navigate('Companions', companion ? { editId: conversation?.companionId } : undefined)} />
           {!companion && <IconButton name="settings-outline" accessibilityLabel="打开设置" onPress={() => navigation.navigate('Settings')} />}
@@ -689,6 +697,28 @@ export function ChatScreen({ navigation }: Props) {
     }
   }, [conversation, failAssistant, prepareRegeneration, runGeneration]);
 
+  const jumpToMessage = useCallback((messageId: string) => {
+    const index = timelineMessageIndex(timeline, messageId);
+    if (index < 0) return;
+    autoFollow.current = false;
+    setShowScrollButton(true);
+    setRecordsVisible(false);
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
+    });
+  }, [timeline]);
+
+  const jumpToDay = useCallback((dividerKey: string) => {
+    const index = timelineDividerIndex(timeline, dividerKey);
+    if (index < 0) return;
+    autoFollow.current = false;
+    setShowScrollButton(true);
+    setRecordsVisible(false);
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0 });
+    });
+  }, [timeline]);
+
   useEffect(() => {
     // The render that scheduled this effect may predate a send, retry, or
     // completion. Only the live store is authoritative for network effects.
@@ -790,13 +820,13 @@ export function ChatScreen({ navigation }: Props) {
       ? ['keyboardWillShow', 'keyboardWillChangeFrame'] as const
       : ['keyboardDidShow', 'keyboardDidChangeFrame'] as const;
     const subscriptions = eventNames.map((eventName) => Keyboard.addListener(eventName, () => {
-      scheduleScrollToBottom(true);
+      if (!recordsVisible) scheduleScrollToBottom(true);
     }));
     return () => {
       subscriptions.forEach((subscription) => subscription.remove());
       clearScrollTimers();
     };
-  }, [clearScrollTimers, scheduleScrollToBottom]);
+  }, [clearScrollTimers, recordsVisible, scheduleScrollToBottom]);
 
   const onScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -823,27 +853,31 @@ export function ChatScreen({ navigation }: Props) {
         <FlatList
           ref={listRef}
           style={styles.messageList}
-          data={conversation.messages}
-          keyExtractor={(item) => item.id}
-          renderItem={({ item }) => (
+          data={timeline}
+          keyExtractor={(item) => item.key}
+          renderItem={({ item }) => item.type === 'date' ? (
+            <View style={[styles.dateDivider, { backgroundColor: theme.colors.surfaceMuted }]}>
+              <Text style={[styles.dateDividerText, { color: theme.colors.textTertiary }]}>{item.label}</Text>
+            </View>
+          ) : (
             <MessageBubble
-              message={item}
-              onPlayVoice={() => { void voiceChat.play(item); }}
-              onRetryVoice={() => voiceChat.retry(item)}
-              voicePlaying={voiceChat.playingId === item.id}
+              message={item.message}
+              onPlayVoice={() => { void voiceChat.play(item.message); }}
+              onRetryVoice={() => voiceChat.retry(item.message)}
+              voicePlaying={voiceChat.playingId === item.message.id}
               companion={companion}
               companionName={companionProfile?.name || conversation.companionName}
               companionFace={companionProfile?.avatarFileId}
               serverUrl={settings.serverUrl}
               accessToken={accessToken}
               user={currentUser}
-              onFork={item.role === 'assistant' ? () => fork.open(item.id, 'continue') : undefined}
-              onRewrite={item.role === 'user' ? () => fork.open(item.id, 'rewrite') : undefined}
-              onRetry={item.role === 'assistant' && !(item.status === 'error' && item.retryable === false) ? () => regenerate(item.id) : undefined}
-              onEditRequest={item.role === 'assistant' && item.status === 'error' && item.retryable === false ? () => editFailedRequest(item.id) : undefined}
-              onToggleStarred={item.role === 'assistant' ? () => useAppStore.getState().toggleMessageStarred(conversation.id, item.id) : undefined}
-              onReadAloud={item.role === 'assistant' ? () => { if (companion) { speech.stop(); voiceChat.readAloud(item); } else { voiceChat.stop(); speech.open(item.id); } } : undefined}
-              readingAloud={voiceChat.playingId === item.id || (speech.state.messageId === item.id && ['preparing', 'speaking'].includes(speech.state.phase))}
+              onFork={item.message.role === 'assistant' ? () => fork.open(item.message.id, 'continue') : undefined}
+              onRewrite={item.message.role === 'user' ? () => fork.open(item.message.id, 'rewrite') : undefined}
+              onRetry={item.message.role === 'assistant' && !(item.message.status === 'error' && item.message.retryable === false) ? () => regenerate(item.message.id) : undefined}
+              onEditRequest={item.message.role === 'assistant' && item.message.status === 'error' && item.message.retryable === false ? () => editFailedRequest(item.message.id) : undefined}
+              onToggleStarred={item.message.role === 'assistant' ? () => useAppStore.getState().toggleMessageStarred(conversation.id, item.message.id) : undefined}
+              onReadAloud={item.message.role === 'assistant' ? () => { if (companion) { speech.stop(); voiceChat.readAloud(item.message); } else { voiceChat.stop(); speech.open(item.message.id); } } : undefined}
+              readingAloud={voiceChat.playingId === item.message.id || (speech.state.messageId === item.message.id && ['preparing', 'speaking'].includes(speech.state.phase))}
             />
           )}
           contentContainerStyle={styles.listContent}
@@ -852,6 +886,9 @@ export function ChatScreen({ navigation }: Props) {
           onScroll={onScroll}
           scrollEventThrottle={80}
           onContentSizeChange={() => { scheduleScrollToBottom(false); }}
+          onScrollToIndexFailed={({ index, averageItemLength }) => {
+            listRef.current?.scrollToOffset({ offset: averageItemLength * index, animated: true });
+          }}
           ListFooterComponent={companion ? null : <Text style={[styles.disclaimer, { color: theme.colors.textTertiary, fontFamily: theme.fonts.regular }]}>AI 可能会出错，重要信息请核实。</Text>}
         />
       )}
@@ -920,6 +957,14 @@ export function ChatScreen({ navigation }: Props) {
         onSelectVerbosity={(verbosity) => updateSettings({ verbosity })}
         onClose={() => setOptionsVisible(false)}
       />
+      <ChatRecordsSheet
+        visible={recordsVisible}
+        companionName={companion ? (companionProfile?.name || conversation.companionName) : undefined}
+        timeline={timeline}
+        onClose={() => setRecordsVisible(false)}
+        onJumpMessage={jumpToMessage}
+        onJumpDay={jumpToDay}
+      />
     </>
   );
 
@@ -937,6 +982,8 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   messageList: { flex: 1 },
   listContent: { paddingTop: 8, paddingBottom: 8, flexGrow: 1 },
+  dateDivider: { alignSelf: 'center', marginVertical: 10, paddingHorizontal: 12, paddingVertical: 4, borderRadius: 12 },
+  dateDividerText: { fontSize: 11, fontWeight: '500' },
   headerTitleButton: { flexDirection: 'row', alignItems: 'center', gap: 3, maxWidth: 255 },
   headerTitle: { alignItems: 'flex-start', maxWidth: 235 },
   headerMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
