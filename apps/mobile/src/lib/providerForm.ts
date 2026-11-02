@@ -6,6 +6,7 @@ export type ProviderForm = {
   apiKey: string;
   apiBaseUrlSet: boolean;
   apiKeySet: boolean;
+  apiKeyHint: string;
   apiMode: 'responses' | 'chat-completions';
   authMode: 'bearer' | 'api-key' | 'none';
   defaultModel: string;
@@ -13,15 +14,17 @@ export type ProviderForm = {
 };
 
 export const emptyProviderForm: ProviderForm = {
-  apiBaseUrl: '', apiKey: '', apiBaseUrlSet: false, apiKeySet: false,
+  apiBaseUrl: '', apiKey: '', apiBaseUrlSet: false, apiKeySet: false, apiKeyHint: '',
   apiMode: 'responses', authMode: 'bearer',
   defaultModel: DEFAULT_MODEL_ID, allowedModels: DEFAULT_MODEL_ID,
 };
 
 export function providerFormFrom(settings: ProviderAdminSettings): ProviderForm {
   // Explicit allowlist: never spread a server-owned object containing old secret fields into state.
+  // The full key stays write-only; the URL and a masked key hint are safe to show administrators.
   return {
-    apiBaseUrl: '', apiKey: '', apiBaseUrlSet: settings.apiBaseUrlSet, apiKeySet: settings.apiKeySet,
+    apiBaseUrl: settings.apiBaseUrl, apiKey: '', apiBaseUrlSet: settings.apiBaseUrlSet, apiKeySet: settings.apiKeySet,
+    apiKeyHint: settings.apiKeyHint,
     apiMode: settings.apiMode, authMode: settings.authMode, defaultModel: settings.defaultModel,
     allowedModels: settings.allowedModels.join(', '),
   };

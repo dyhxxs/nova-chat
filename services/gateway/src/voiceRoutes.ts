@@ -11,19 +11,30 @@ import { chatVoices, resolveChatVoice } from './voiceCatalog.js';
 export { CHAT_VOICES } from './voiceCatalog.js';
 const speechSchema = z.object({ requestId: z.string().uuid(), text: z.string().trim().min(1).max(2000), voiceId: z.string().max(120).optional() });
 const idSchema = z.object({ requestId: z.string().uuid() });
+const recordingQuerySchema = z.object({
+  durationMs: z.coerce.number().int().min(600).max(61_000),
+  languageId: z.enum(['cantonese', 'english']).optional(),
+});
 
 export function registerVoiceRoutes(app: FastifyInstance, database: AppDatabase, config: AppConfig,
   requireUser: (request: FastifyRequest, reply: FastifyReply) => { id: string; sessionId: string } | undefined) {
   const active = new Map<string, Promise<any>>();
-  const credentials = () => {
-    const saved = database.getCompanionProviderSettings('chat');
-    const baseUrl = config.voiceBaseUrl || saved.apiBaseUrl;
-    const sameDestination = baseUrl.replace(/\/+$/, '') === saved.apiBaseUrl.replace(/\/+$/, '');
-    return { baseUrl, key: config.voiceApiKey || (sameDestination ? saved.apiKey : '') };
+  const voiceSettings = () => database.getVoiceProviderSettings();
+  const effectiveConfig = () => {
+    const settings = voiceSettings();
+    return { ...config, voiceBaseUrl: settings.apiBaseUrl, voiceApiKey: settings.apiKey, voiceTtsModel: settings.ttsModel,
+      voiceAsrModel: settings.asrModel, voiceDefaultId: settings.defaultVoiceId };
   };
-  const provider = (model = config.voiceTtsModel) => {
+  const credentials = () => {
+    const configured = voiceSettings();
+    const saved = database.getCompanionProviderSettings('chat');
+    const baseUrl = configured.apiBaseUrl || saved.apiBaseUrl;
+    const sameDestination = baseUrl.replace(/\/+$/, '') === saved.apiBaseUrl.replace(/\/+$/, '');
+    return { baseUrl, key: configured.apiKey || (sameDestination ? saved.apiKey : '') };
+  };
+  const provider = (model = voiceSettings().ttsModel) => {
     const { baseUrl, key } = credentials();
-    return new VoiceProvider(baseUrl, key, model, config.voiceAsrModel);
+    return new VoiceProvider(baseUrl, key, model, voiceSettings().asrModel);
   };
   const execute = async (key: string, userId: string, work: () => Promise<any>) => {
     const existing = active.get(key); if (existing) return existing;
@@ -53,13 +64,14 @@ export function registerVoiceRoutes(app: FastifyInstance, database: AppDatabase,
   app.get('/v1/voice/config', async (request, reply) => {
     if (!account(request, reply)) return;
     reply.header('cache-control', 'no-store');
-    return { enabled: Boolean(credentials().key), maxDurationMs: 60_000, defaultVoiceId: resolveChatVoice(config)?.id ?? config.voiceDefaultId, voices: chatVoices(config) };
+    return { enabled: Boolean(credentials().key), maxDurationMs: 60_000, defaultVoiceId: resolveChatVoice(effectiveConfig())?.id ?? voiceSettings().defaultVoiceId, voices: chatVoices(config) };
   });
   app.post('/v1/voice/messages/:requestId', async (request, reply) => {
     const user = account(request, reply); if (!user) return;
     try {
       const { requestId } = idSchema.parse(request.params);
-      const durationMs = z.coerce.number().int().min(600).max(61_000).parse((request.query as { durationMs?: string }).durationMs);
+      const query = recordingQuerySchema.parse(request.query);
+      const durationMs = query.durationMs;
       const cached = database.getVoiceJob(user.id, requestId);
       if (cached) { if (cached.kind !== 'recording') throw new VoiceError('voice_id_conflict', '语音标识冲突，请重新录制。', 409, false); return { voice: cached.voice, text: cached.text }; }
       const part = await request.file({ limits: { fileSize: MAX_VOICE_BYTES, files: 1 } });
@@ -68,7 +80,7 @@ export function registerVoiceRoutes(app: FastifyInstance, database: AppDatabase,
       const format = detectVoiceAudio(bytes);
       if (!format || !bytes.length || part.file.truncated) throw new VoiceError('voice_invalid_audio', '语音格式无效或文件过大，请重新录制。', 415, false);
       return await execute(user.id + ':record:' + requestId, user.id, async () => {
-        const text = await provider().transcribe(bytes, format.mimeType);
+        const text = await provider().transcribe(bytes, format.mimeType, query.languageId);
         const fileId = await storeAudio(user.id, bytes);
         const voice = { fileId, durationMs, status: 'ready', requestId };
         database.saveVoiceJob(user.id, requestId, { kind: 'recording', text, voice });
@@ -83,7 +95,7 @@ export function registerVoiceRoutes(app: FastifyInstance, database: AppDatabase,
     const user = account(request, reply); if (!user) return;
     try {
       const input = speechSchema.parse(request.body);
-      const selected = resolveChatVoice(config, input.voiceId);
+      const selected = resolveChatVoice(effectiveConfig(), input.voiceId);
       reply.code(202);
       return await execute(user.id + ':tts:' + input.requestId, user.id, async () => {
         const existing = database.getVoiceJob(user.id, input.requestId);

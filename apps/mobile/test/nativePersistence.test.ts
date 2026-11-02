@@ -21,6 +21,7 @@ vi.mock('expo-sqlite', () => ({ openDatabaseAsync: vi.fn(async () => {
   shared.fixture ??= testSnapshotDatabase(); return shared.fixture.db;
 }) }));
 vi.mock('../src/services/snapshotStorage', async () => import('../src/services/snapshotStorage.native'));
+vi.mock('../src/services/credentialStorage', async () => import('../src/services/credentialStorage.native'));
 import * as SecureStore from 'expo-secure-store';
 import { AUTH_INTENT_KEY, CREDENTIAL_KEY } from '../src/lib/credentialVault';
 import { SQLITE_MIGRATION_MARKER } from '../src/lib/sqliteSnapshotRepository';

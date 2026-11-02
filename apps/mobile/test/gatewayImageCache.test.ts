@@ -33,6 +33,7 @@ vi.mock('expo-file-system', () => {
 });
 
 import { gatewayImageRequest, loadGatewayImage } from '../src/services/gatewayImageCache';
+import { APP_VERSION, APP_VERSION_CODE } from '../src/lib/appUpdate';
 
 const attachment = {
   id: '123e4567-e89b-12d3-a456-426614174000',
@@ -55,7 +56,7 @@ describe('gateway image cache', () => {
     const request = gatewayImageRequest('http://192.168.0.113:8787', 'session-secret', attachment);
     expect(request.url).toBe(`http://192.168.0.113:8787/v1/files/${attachment.id}`);
     expect(request.url).not.toContain('session-secret');
-    expect(request.headers).toEqual({ authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34' });
+    expect(request.headers).toEqual({ authorization: 'Bearer session-secret', 'x-nova-app-version': APP_VERSION, 'x-nova-app-version-code': String(APP_VERSION_CODE) });
     expect(request.cacheFileName).toMatch(/^[a-f0-9]{8}-123e4567-e89b-12d3-a456-426614174000\.jpg$/);
   });
 
@@ -70,7 +71,7 @@ describe('gateway image cache', () => {
       `http://192.168.0.113:8787/v1/files/${attachment.id}`,
       expect.objectContaining({ uri: firstUri }),
       expect.objectContaining({
-        headers: { authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34' },
+        headers: { authorization: 'Bearer session-secret', 'x-nova-app-version': APP_VERSION, 'x-nova-app-version-code': String(APP_VERSION_CODE) },
         idempotent: true,
       }),
     );

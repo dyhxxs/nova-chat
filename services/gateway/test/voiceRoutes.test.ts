@@ -56,8 +56,8 @@ describe('voice endpoints', () => {
     const audio=Buffer.alloc(64);audio.write('RIFF',0);audio.write('WAVE',8);
     const boundary='voice-test', requestId=randomUUID();
     const payload=Buffer.concat([Buffer.from('--'+boundary+'\r\nContent-Disposition: form-data; name="file"; filename="voice.wav"\r\nContent-Type: audio/wav\r\n\r\n'),audio,Buffer.from('\r\n--'+boundary+'--\r\n')]);
-    const result=await app.inject({method:'POST',url:'/v1/voice/messages/'+requestId+'?durationMs=1200',headers:{...headers,'content-type':'multipart/form-data; boundary='+boundary},payload});
-    expect(result.statusCode).toBe(200);expect(result.json().text).toBe('今天想聊聊');
+    const result=await app.inject({method:'POST',url:'/v1/voice/messages/'+requestId+'?durationMs=1200&languageId=cantonese',headers:{...headers,'content-type':'multipart/form-data; boundary='+boundary},payload});
+    expect(result.statusCode).toBe(200);expect(result.json().text).toBe('今天想聊聊'); expect(transcribe).toHaveBeenCalledWith(expect.any(Buffer), 'audio/wav', 'cantonese');
     const duplicate=await app.inject({method:'POST',url:'/v1/voice/messages/'+requestId+'?durationMs=1200',headers});
     expect(duplicate.json().voice.fileId).toBe(result.json().voice.fileId);expect(transcribe).toHaveBeenCalledOnce();
     const download=await app.inject({url:'/v1/files/'+result.json().voice.fileId,headers});expect(download.rawPayload).toEqual(audio);

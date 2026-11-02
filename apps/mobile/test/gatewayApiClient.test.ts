@@ -7,6 +7,7 @@ vi.mock('expo-file-system', () => ({
 }));
 
 import { changeAccountPassword, listLoginSessions, revokeLoginSession, revokeOtherLoginSessions, cancelGenerationJob, fetchSetupStatus, getGenerationJob, login, logout, removeAvatar, testProvider, getProviderSettings, saveProviderSettings } from '../src/services/gatewayApiClient';
+import { APP_VERSION, APP_VERSION_CODE } from '../src/lib/appUpdate';
 
 const user = {
   id: '00000000-0000-4000-8000-000000000001',
@@ -49,7 +50,7 @@ describe('gateway JSON request headers', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(fetchMock.mock.calls.map(([, init]) => init?.method)).toEqual(['POST', 'POST', 'POST', 'DELETE']);
     for (const [, init] of fetchMock.mock.calls) {
-      expect(init?.headers).toEqual(expect.objectContaining({ 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34' }));
+      expect(init?.headers).toEqual(expect.objectContaining({ 'x-nova-app-version': APP_VERSION, 'x-nova-app-version-code': String(APP_VERSION_CODE) }));
       expect(init?.body).toBeUndefined();
       expect(init?.headers).toEqual(expect.objectContaining({ authorization: 'Bearer session-token' }));
       expect(init?.headers).not.toHaveProperty('content-type');
@@ -126,19 +127,22 @@ describe('security API confirmations', () => {
 
 describe('private administrator provider summaries', () => {
   afterEach(() => vi.unstubAllGlobals());
-  const metadata = { apiBaseUrlSet: true, apiKeySet: true, apiMode: 'responses' as const, authMode: 'bearer' as const, defaultModel: 'model-a', allowedModels: ['model-a'] };
-  it.each(['get', 'save'] as const)('strips secret and unknown fields from %s responses', async (action) => {
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: { ...metadata, apiBaseUrl: 'https://private.example/v1', apiKey: 'secret-value', apiKeyPreview: '••••7359', extra: { password: 'do-not-propagate' } } }));
+  const metadata = { apiBaseUrl: 'https://private.example/v1', apiBaseUrlSet: true, apiKeySet: true, apiKeyHint: 'sk-pri…7359', apiMode: 'responses' as const, authMode: 'bearer' as const, defaultModel: 'model-a', allowedModels: ['model-a'] };
+  it.each(['get', 'save'] as const)('keeps the displayed URL and masked hint while stripping the full key and unknown fields from %s responses', async (action) => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: { ...metadata, apiKey: 'secret-value', extra: { password: 'do-not-propagate' } } }));
     vi.stubGlobal('fetch', fetch);
     const result = action === 'get' ? await getProviderSettings('https://gateway.test', 'token') : await saveProviderSettings('https://gateway.test', 'token', metadata);
     expect(result).toEqual(metadata);
-    for (const value of ['private.example', 'secret-value', '7359', 'do-not-propagate']) expect(JSON.stringify(result)).not.toContain(value);
+    expect(JSON.stringify(result)).not.toContain('secret-value');
+    expect(JSON.stringify(result)).not.toContain('do-not-propagate');
+    expect(result.apiBaseUrl).toBe('https://private.example/v1');
+    expect(result.apiKeyHint).toBe('sk-pri…7359');
   });
-  it('converts a legacy URL into only a configured flag, never a displayed URL', async () => {
-    const { apiBaseUrlSet: _flag, ...legacy } = metadata;
-    void _flag;
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ provider: { ...legacy, apiBaseUrl: 'https://old-private.example/v1', apiKeyPreview: '••••1234' } })));
-    expect(await getProviderSettings('https://gateway.test', 'token')).toEqual(metadata);
+  it('tolerates legacy summaries without flags or hints by deriving safe defaults', async () => {
+    const { apiBaseUrlSet: _flag, apiKeyHint: _hint, ...legacy } = metadata;
+    void _flag; void _hint;
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ provider: { ...legacy, apiBaseUrl: 'https://old-private.example/v1' } })));
+    expect(await getProviderSettings('https://gateway.test', 'token')).toEqual({ ...legacy, apiBaseUrl: 'https://old-private.example/v1', apiBaseUrlSet: true, apiKeyHint: '' });
   });
   it('rejects malformed summaries without including remote data in the error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ provider: { ...metadata, apiMode: 'secret-provider-url-key' } })));

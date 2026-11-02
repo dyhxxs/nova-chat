@@ -6,6 +6,7 @@ import { Platform } from 'react-native';
 import { gatewayHttpErrorMessage } from '../lib/gatewayHttpError';
 import { normalizeServerUrl, toRestUrl } from '../lib/connection';
 import type { PendingAttachment, UserProfile } from '../types';
+import type { RecordedVoice } from '../lib/voice';
 import { normalizeUserProfile } from '../lib/userDisplayName';
 import { GatewayUploadResponseError, parseGatewayUploadResponse } from './gatewayUploadResponse';
 import { appVersionHeaders, reportUpgradeRequired } from '../lib/appUpdate';
@@ -32,13 +33,70 @@ export type AttachmentUploadProgress = {
 };
 
 export type ProviderAdminSettings = {
+  apiBaseUrl: string;
   apiBaseUrlSet: boolean;
   apiMode: 'responses' | 'chat-completions';
   authMode: 'bearer' | 'api-key' | 'none';
   defaultModel: string;
   allowedModels: string[];
   apiKeySet: boolean;
+  apiKeyHint: string;
   updatedAt?: number;
+};
+
+export type VoiceProviderAdminSettings = {
+  apiBaseUrl: string;
+  apiBaseUrlSet: boolean;
+  apiKeySet: boolean;
+  apiKeyHint: string;
+  ttsModel: string;
+  asrModel: string;
+  defaultVoiceId: string;
+  updatedAt?: number;
+};
+
+export type LanguageLearningLanguage = {
+  id: 'cantonese' | 'english';
+  name: string;
+  nativeName: string;
+  locale: string;
+  description: string;
+};
+export type LanguageLearningConfig = {
+  languages: LanguageLearningLanguage[];
+  voice: { enabled: boolean; defaultVoiceId: string; voices: { id: string; name: string; model?: string; aliases?: string[] }[] };
+};
+export type LanguageLearningRequest = {
+  languageId: LanguageLearningLanguage['id'];
+  message: string;
+  history?: { role: 'user' | 'assistant'; content: string }[];
+  level?: 'beginner' | 'intermediate' | 'advanced';
+  mode?: 'conversation' | 'translate' | 'pronunciation';
+};
+export type LanguageLearningReply = {
+  languageId: LanguageLearningLanguage['id'];
+  mode: string;
+  reply: string;
+  translation: string;
+  correction: string;
+  pronunciation: string;
+  lesson: string;
+  followUp: string;
+  speechText: string;
+  model?: string;
+};
+
+export type LanguagePronunciationAssessment = {
+  languageId: LanguageLearningLanguage['id'];
+  targetText: string;
+  heardText: string;
+  score: number;
+  level: 'excellent' | 'good' | 'retry';
+  summary: string;
+  issues: string;
+  standardPronunciation: string;
+  nextStep: string;
+  model?: string;
 };
 
 export type ProviderTestInput = {
@@ -416,7 +474,10 @@ export async function updateUser(serverUrl: string, accessToken: string, userId:
 }
 
 const providerSummarySchema = z.object({
-  apiBaseUrlSet: z.boolean(), apiKeySet: z.boolean(),
+  apiBaseUrl: z.string(),
+  apiBaseUrlSet: z.boolean(),
+  apiKeySet: z.boolean(),
+  apiKeyHint: z.string(),
   apiMode: z.enum(['responses', 'chat-completions']),
   authMode: z.enum(['bearer', 'api-key', 'none']),
   defaultModel: z.string(), allowedModels: z.array(z.string()), updatedAt: z.number().optional(),
@@ -424,13 +485,98 @@ const providerSummarySchema = z.object({
 
 function privateProviderSummary(value: unknown): ProviderAdminSettings {
   const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
-  // Strip legacy server URL/key/preview and every unknown field before returning to any UI.
+  // Keep only the administrator-safe fields; the full key and every unknown field are dropped.
   const result = providerSummarySchema.safeParse({
     ...source,
+    apiBaseUrl: typeof source.apiBaseUrl === 'string' ? source.apiBaseUrl : '',
     apiBaseUrlSet: typeof source.apiBaseUrlSet === 'boolean' ? source.apiBaseUrlSet : Boolean(source.apiBaseUrl),
+    apiKeyHint: typeof source.apiKeyHint === 'string' ? source.apiKeyHint : '',
   });
   if (!result.success) throw new GatewayApiError('invalid_provider_response', '模型服务状态格式不正确，请更新网关。', false, 502);
   return result.data;
+}
+
+const voiceProviderSummarySchema = z.object({
+  apiBaseUrl: z.string(), apiBaseUrlSet: z.boolean(), apiKeySet: z.boolean(), apiKeyHint: z.string(),
+  ttsModel: z.string(), asrModel: z.string(), defaultVoiceId: z.string(), updatedAt: z.number().optional(),
+});
+
+function privateVoiceProviderSummary(value: unknown): VoiceProviderAdminSettings {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const result = voiceProviderSummarySchema.safeParse({
+    ...source,
+    apiBaseUrl: typeof source.apiBaseUrl === 'string' ? source.apiBaseUrl : '',
+    apiBaseUrlSet: typeof source.apiBaseUrlSet === 'boolean' ? source.apiBaseUrlSet : Boolean(source.apiBaseUrl),
+    apiKeyHint: typeof source.apiKeyHint === 'string' ? source.apiKeyHint : '',
+  });
+  if (!result.success) throw new GatewayApiError('invalid_voice_provider_response', '语音服务状态格式不正确，请更新网关。', false, 502);
+  return result.data;
+}
+
+export async function getVoiceProviderSettings(serverUrl: string, accessToken: string): Promise<VoiceProviderAdminSettings> {
+  const data = await requestJson<{ provider: unknown }>(serverUrl, '/v1/admin/voice-provider', { accessToken });
+  return privateVoiceProviderSummary(data.provider);
+}
+
+export async function saveVoiceProviderSettings(serverUrl: string, accessToken: string, input: {
+  apiBaseUrl?: string; apiKey?: string; ttsModel: string; asrModel: string; defaultVoiceId: string;
+}): Promise<VoiceProviderAdminSettings> {
+  const data = await requestJson<{ provider: unknown }>(serverUrl, '/v1/admin/voice-provider', {
+    method: 'PUT', body: JSON.stringify(input), accessToken,
+  });
+  return privateVoiceProviderSummary(data.provider);
+}
+
+export function getLanguageLearningConfig(serverUrl: string, accessToken: string, signal?: AbortSignal): Promise<LanguageLearningConfig> {
+  return requestJson<LanguageLearningConfig>(serverUrl, '/v1/language-learning/config', { accessToken, signal });
+}
+
+export function sendLanguageLearningMessage(serverUrl: string, accessToken: string, input: LanguageLearningRequest, signal?: AbortSignal): Promise<LanguageLearningReply> {
+  return requestJson<LanguageLearningReply>(serverUrl, '/v1/language-learning/chat', {
+    method: 'POST', body: JSON.stringify(input), accessToken, signal, timeoutMs: 90_000,
+  });
+}
+
+export function translateLanguageLearningMessage(serverUrl: string, accessToken: string, input: LanguageLearningRequest, signal?: AbortSignal): Promise<LanguageLearningReply> {
+  return requestJson<LanguageLearningReply>(serverUrl, '/v1/language-learning/translate', {
+    method: 'POST', body: JSON.stringify(input), accessToken, signal, timeoutMs: 90_000,
+  });
+}
+
+export function assessLanguagePronunciation(serverUrl: string, accessToken: string, input: {
+  languageId: LanguageLearningLanguage['id'];
+  targetText: string;
+  transcript: string;
+  level?: LanguageLearningRequest['level'];
+}, signal?: AbortSignal): Promise<LanguagePronunciationAssessment> {
+  return requestJson<LanguagePronunciationAssessment>(serverUrl, '/v1/language-learning/pronunciation', {
+    method: 'POST', accessToken, signal, timeoutMs: 120_000, body: JSON.stringify(input),
+  });
+}
+
+export async function assessLanguagePronunciationAudio(serverUrl: string, accessToken: string, recording: RecordedVoice, input: {
+  languageId: LanguageLearningLanguage['id'];
+  targetText: string;
+  level?: LanguageLearningRequest['level'];
+}, signal?: AbortSignal): Promise<LanguagePronunciationAssessment> {
+  const form = new FormData();
+  if (Platform.OS === 'web') {
+    const source = await fetch(recording.uri, { signal });
+    form.append('file', await source.blob(), 'pronunciation.webm');
+  } else {
+    // React Native's fetch implementation does not consistently serialize the
+    // legacy `{ uri, type, name }` pseudo-file on Android. Read the native file
+    // into a real Blob so the request is actually emitted as multipart data.
+    const source = new File(recording.uri);
+    if (!source.exists) throw new GatewayApiError('local_file_unavailable', '无法读取录音文件，请重新录制。', false, 0);
+    form.append('file', new Blob([await source.bytes()], { type: recording.mimeType }), 'pronunciation.m4a');
+  }
+  form.append('languageId', input.languageId);
+  form.append('targetText', input.targetText);
+  form.append('level', input.level ?? 'beginner');
+  return requestJson<LanguagePronunciationAssessment>(serverUrl, '/v1/language-learning/pronunciation', {
+    method: 'POST', accessToken, signal, timeoutMs: 150_000, body: form,
+  });
 }
 
 export async function getProviderSettings(serverUrl: string, accessToken: string): Promise<ProviderAdminSettings> {

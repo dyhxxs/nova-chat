@@ -1,13 +1,15 @@
 import { useCompanionNotifications } from './src/hooks/useCompanionNotifications';
+import { useConversationSync } from './src/hooks/useConversationSync';
 import { appNavigationRef, flushCompanionNotification } from './src/lib/notificationNavigation';
 import { useCompanionEvents } from './src/hooks/useCompanionEvents';
 import { KnowledgeScreen } from './src/screens/KnowledgeScreen';
 import { CredentialNotice } from './src/components/CredentialNotice';
+import { DesktopSidebar } from './src/components/DesktopSidebar';
 import { DiagnosticsScreen } from './src/screens/DiagnosticsScreen';
 import { AssistantsScreen } from './src/screens/AssistantsScreen';
 import { CompanionsScreen } from './src/screens/CompanionsScreen';
 import { useEffect } from 'react';
-import { ActivityIndicator, AppState, Linking, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Linking, Modal, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -22,6 +24,7 @@ import { AdminScreen } from './src/screens/AdminScreen';
 import { ChatScreen } from './src/screens/ChatScreen';
 import { HistoryScreen } from './src/screens/HistoryScreen';
 import { LoginScreen } from './src/screens/LoginScreen';
+import { LanguageLearningScreen } from './src/screens/LanguageLearningScreen';
 import { ProfileScreen } from './src/screens/ProfileScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { useSessionRecovery } from './src/hooks/useSessionRecovery';
@@ -78,6 +81,7 @@ function UpdateRequiredGate() {
 function AppContent() {
   useCompanionNotifications();
   useCompanionEvents();
+  useConversationSync();
   const { error: sessionError, retrying, retryScheduled, retryNow, exitSession } = useSessionRecovery();
   const [fontsLoaded, fontError] = useFonts({
     Manrope: Manrope_400Regular,
@@ -89,6 +93,10 @@ function AppContent() {
   const hydrated = useAppStore((state) => state.hydrated);
   const hydrate = useAppStore((state) => state.hydrate);
   const authStatus = useAppStore((state) => state.authStatus);
+  const { width } = useWindowDimensions();
+  // Wide (desktop) browsers get a persistent sidebar + chat two-pane layout;
+  // phones, tablets and narrow windows keep the full-screen stack navigation.
+  const desktop = Platform.OS === 'web' && width > 900;
 
   useEffect(() => { void hydrate(); }, [hydrate]);
   useEffect(() => {
@@ -115,42 +123,54 @@ function AppContent() {
     return <><View style={[styles.loading, { backgroundColor: theme.colors.background }]}><ActivityIndicator color={theme.colors.primary} /></View>{updateGate}</>;
   }
   const authenticated = authStatus === 'authenticated';
+  const navigator = (
+    <Stack.Navigator screenOptions={{
+      headerShadowVisible: false,
+      headerStyle: { backgroundColor: theme.colors.background },
+      headerTintColor: theme.colors.text,
+      headerTitleStyle: { fontFamily: theme.fonts.bold, fontWeight: '700' },
+      contentStyle: { backgroundColor: theme.colors.background },
+      animation: 'slide_from_right',
+    }}>
+      {!authenticated ? (
+        <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
+      ) : (
+        <>
+          <Stack.Screen name="Chat" getId={() => 'main-chat'} component={ChatScreen} options={{ title: 'Nova' }} />
+          <Stack.Screen name="History" component={HistoryScreen} options={{ title: '对话历史', presentation: 'modal' }} />
+          <Stack.Screen name="Saved" component={SavedScreen} options={{ title: '收藏夹' }} />
+          <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: '设置' }} />
+          <Stack.Screen name="Profile" component={ProfileScreen} options={{ title: '个人信息' }} />
+          <Stack.Screen name="Admin" component={AdminScreen} options={{ title: '管理控制台' }} />
+          <Stack.Screen name="Security" component={SecurityScreen} options={{ title: '账户安全' }} />
+          <Stack.Screen name="Knowledge" component={KnowledgeScreen} options={{ title: '个人资料库' }} />
+          <Stack.Screen name="Assistants" component={AssistantsScreen} options={{ title: '助手库' }} />
+          <Stack.Screen name="LanguageLearning" component={LanguageLearningScreen} options={{ title: '语言学习' }} />
+          <Stack.Screen name="Companions" component={CompanionsScreen} options={{ title: 'AI 陪伴' }} />
+          <Stack.Screen name="CompanionConversations" component={HistoryScreen} options={{ title: '人设对话' }} />
+          <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} options={{ title: '连接诊断' }} />
+          <Stack.Screen name="Data" component={DataScreen} options={{ title: '数据与备份' }} />
+          <Stack.Screen name="About" component={AboutScreen} options={{ title: '关于' }} />
+        </>
+      )}
+    </Stack.Navigator>
+  );
+
   return (
     <AppThemeProvider customFontsLoaded={fontsLoaded}>
-      <View style={styles.root}>
-      <CredentialNotice />
-      <NavigationContainer ref={appNavigationRef} onReady={flushCompanionNotification} theme={theme.navigation}>
-      <StatusBar style={theme.dark ? 'light' : 'dark'} />
-      <Stack.Navigator screenOptions={{
-        headerShadowVisible: false,
-        headerStyle: { backgroundColor: theme.colors.background },
-        headerTintColor: theme.colors.text,
-        headerTitleStyle: { fontFamily: theme.fonts.bold, fontWeight: '700' },
-        contentStyle: { backgroundColor: theme.colors.background },
-        animation: 'slide_from_right',
-      }}>
-        {!authenticated ? (
-          <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
-        ) : (
-          <>
-            <Stack.Screen name="Chat" getId={() => 'main-chat'} component={ChatScreen} options={{ title: 'Nova' }} />
-            <Stack.Screen name="History" component={HistoryScreen} options={{ title: '对话历史', presentation: 'modal' }} />
-            <Stack.Screen name="Saved" component={SavedScreen} options={{ title: '收藏夹' }} />
-            <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: '设置' }} />
-            <Stack.Screen name="Profile" component={ProfileScreen} options={{ title: '个人信息' }} />
-            <Stack.Screen name="Admin" component={AdminScreen} options={{ title: '管理控制台' }} />
-            <Stack.Screen name="Security" component={SecurityScreen} options={{ title: '账户安全' }} />
-            <Stack.Screen name="Knowledge" component={KnowledgeScreen} options={{ title: '个人资料库' }} />
-            <Stack.Screen name="Assistants" component={AssistantsScreen} options={{ title: '助手库' }} />
-            <Stack.Screen name="Companions" component={CompanionsScreen} options={{ title: 'AI 陪伴' }} />
-            <Stack.Screen name="CompanionConversations" component={HistoryScreen} options={{ title: '人设对话' }} />
-            <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} options={{ title: '连接诊断' }} />
-            <Stack.Screen name="Data" component={DataScreen} options={{ title: '数据与备份' }} />
-            <Stack.Screen name="About" component={AboutScreen} options={{ title: '关于' }} />
-          </>
-        )}
-      </Stack.Navigator>
-      </NavigationContainer>
+      <View style={[styles.root, { backgroundColor: theme.colors.background }]}>
+        <CredentialNotice />
+        <NavigationContainer ref={appNavigationRef} onReady={flushCompanionNotification} theme={theme.navigation}>
+          <StatusBar style={theme.dark ? 'light' : 'dark'} />
+          {authenticated && desktop ? (
+            <View style={styles.desktopShell}>
+              <DesktopSidebar />
+              <View style={styles.desktopContent}>{navigator}</View>
+            </View>
+          ) : (
+            <View style={styles.root}>{navigator}</View>
+          )}
+        </NavigationContainer>
       </View>
       {updateGate}
     </AppThemeProvider>
@@ -168,4 +188,4 @@ const updateStyles = StyleSheet.create({
   button: { minHeight: 48, borderRadius: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 },
   buttonText: { fontSize: 15, fontWeight: '700' as const },
 });
-const styles = StyleSheet.create({ root: { flex: 1 }, loading: { flex: 1, alignItems: 'center', justifyContent: 'center' } });
+const styles = StyleSheet.create({ root: { flex: 1 }, loading: { flex: 1, alignItems: 'center', justifyContent: 'center' }, desktopShell: { flex: 1, flexDirection: 'row' }, desktopContent: { flex: 1, minWidth: 0 } });

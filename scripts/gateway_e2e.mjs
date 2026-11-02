@@ -7,6 +7,7 @@ import path from 'node:path';
 import { loadConfig } from '../services/gateway/src/config.ts';
 import { buildServer } from '../services/gateway/src/server.ts';
 import { WebSocket } from 'ws';
+import { currentAppVersion, currentAppVersionCode } from './app_version.mjs';
 
 const fake = createServer(async (request, response) => {
   if (request.method === 'GET' && request.url === '/v1/models') {
@@ -80,7 +81,7 @@ const wsResult = await new Promise((resolve, reject) => {
   const socket = new WebSocket(origin.replace('http:', 'ws:') + '/v1/chat/stream');
   let text = '';
   const timer = setTimeout(() => { socket.terminate(); reject(new Error('websocket timeout')); }, 5000);
-  socket.on('open', () => socket.send(JSON.stringify({ type: 'hello', accessToken: userToken, deviceId: 'e2e-user-device', appVersion: '1.1.32', appVersionCode: 34 })));
+  socket.on('open', () => socket.send(JSON.stringify({ type: 'hello', accessToken: userToken, deviceId: 'e2e-user-device', appVersion: currentAppVersion, appVersionCode: currentAppVersionCode })));
   socket.on('message', (raw) => {
     const message = JSON.parse(raw.toString());
     if (message.type === 'ready') socket.send(JSON.stringify({ type: 'start', payload: wsPayload }));

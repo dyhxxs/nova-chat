@@ -12,6 +12,15 @@ describe('relay voice adapter', () => {
     expect(body.contents[0].parts[1].inlineData.mimeType).toBe('audio/mp4');
     expect(body.generationConfig.thinkingConfig.thinkingBudget).toBe(0);
   });
+  it('keeps Cantonese speech in its original spoken form for language learning', async () => {
+    const request = vi.fn(async (_url: string, options: RequestInit) => {
+      const body = JSON.parse(options.body as string);
+      expect(body.systemInstruction.parts[0].text).toContain('真实粤语口语');
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '你食咗飯未？' }] } }] }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', request);
+    await expect(new VoiceProvider('https://relay.test/v1', 'key', 'tts', 'asr').transcribe(Buffer.from('recorded-audio'), 'audio/mp4', 'cantonese')).resolves.toBe('你食咗飯未？');
+  });
   it('uses HD clone parameters without sending Doubao-only fields', async () => {
     const request = vi.fn(async () => new Response(JSON.stringify({ code: 200, data: { task_id: 42 } })));
     vi.stubGlobal('fetch', request);

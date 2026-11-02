@@ -487,7 +487,7 @@ export const MessageBubble = memo(function MessageBubble({ companion, companionN
                 <Text style={[styles.actionText, { color: copied ? theme.colors.success : theme.colors.textSecondary, fontFamily: theme.fonts.medium }]}>{copied ? '已复制' : '复制'}</Text>
               </Pressable>
             )}
-            {message.status === 'complete' && (!!message.content.trim() || !!message.attachments.length) && onFork && <Pressable accessibilityRole="button" accessibilityLabel="从这条回复创建分支" onPress={onFork} style={[styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border, minHeight: 44 }]}><Ionicons name="git-branch-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>创建分支</Text></Pressable>}
+            {message.status === 'complete' && (!!message.content.trim() || !!message.attachments.length) && onFork && <Pressable accessibilityRole="button" accessibilityLabel="从这条回复创建分支" onPress={onFork} style={[styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]}><Ionicons name="git-branch-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>创建分支</Text></Pressable>}
             {message.status === 'complete' && (!!message.content.trim() || !!message.attachments.length) && onToggleStarred && (
               <Pressable accessibilityRole="button" accessibilityLabel={message.starred ? '取消收藏这条回复' : '收藏这条回复'} onPress={() => { onToggleStarred(); void Haptics.selectionAsync(); }}
                 style={({ pressed }) => [styles.actionButton, { backgroundColor: message.starred ? theme.colors.primarySoft : theme.colors.surfaceMuted, borderColor: message.starred ? theme.colors.primary : theme.colors.border }, pressed && { opacity: 0.65 }] }>
@@ -502,7 +502,7 @@ export const MessageBubble = memo(function MessageBubble({ companion, companionN
                 <Text style={[styles.actionText, { color: theme.colors.textSecondary, fontFamily: theme.fonts.medium }]}>{readingAloud ? '停止朗读' : '朗读'}</Text>
               </Pressable>
             )}
-            {message.status === 'error' && !canRetry && onEditRequest && <Pressable accessibilityRole="button" accessibilityLabel={editLabel} onPress={onEditRequest} style={[styles.actionButton, { minHeight: 44, backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]}><Ionicons name="create-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>{editLabel}</Text></Pressable>}
+            {message.status === 'error' && !canRetry && onEditRequest && <Pressable accessibilityRole="button" accessibilityLabel={editLabel} onPress={onEditRequest} style={[styles.actionButton, { backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]}><Ionicons name="create-outline" size={15} color={theme.colors.textSecondary} /><Text style={[styles.actionText, { color: theme.colors.textSecondary }]}>{editLabel}</Text></Pressable>}
             {(['error', 'complete', 'cancelled'] as const).includes(message.status as 'error' | 'complete' | 'cancelled') && canRetry && onRetry && (
               <Pressable
                 accessibilityRole="button"
@@ -550,13 +550,13 @@ const styles = StyleSheet.create({
   cancelled: { fontSize: 13, lineHeight: 19, fontStyle: 'italic', marginTop: 2 },
   streamingMeta: { flexDirection: 'row', alignItems: 'center', gap: 7, minHeight: 24, marginTop: 2 },
   streamingText: { fontSize: 11, lineHeight: 16 },
-  modelMeta: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 3, minHeight: 40, paddingVertical: 8 },
+  modelMeta: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2, minHeight: 26, paddingVertical: 3 },
   modelMetaText: { flex: 1, fontSize: 11, lineHeight: 16 },
   detailsCard: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingHorizontal: 11, paddingVertical: 7, marginBottom: 7 },
   detailRow: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 4, gap: 10 },
   detailLabel: { width: 72, fontSize: 11, lineHeight: 16 },
   detailValue: { flex: 1, fontSize: 11, lineHeight: 16, fontWeight: '600' },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2, minHeight: 38 },
-  actionButton: { minHeight: 36, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11, paddingVertical: 6 },
-  actionText: { fontSize: 11, fontWeight: '700' },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2, alignItems: 'center' },
+  actionButton: { minHeight: 28, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 9, paddingVertical: 4 },
+  actionText: { fontSize: 10, fontWeight: '700' },
 });

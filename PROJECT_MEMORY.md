@@ -2,8 +2,8 @@
 
 > **用途**：这是 Nova Chat 的长期上下文和交接记录。开始新的 Codex/ChatGPT 对话时，应先让助手读取本文件，再继续修改项目。
 >
-> **最后更新**：2026-10-15（Asia/Shanghai）
-> **当前版本**：客户端1.1.31 / Android33 / iOS33已公开发布；公网陪伴运行时Agent30已部署。语音先入列、转写手动展开、播放无进度条，陪伴不显示生成占位。新增自然表达与内部资料边界，主动联系以独立调度事件生成，白天按关系提供30/60分钟首次机会；已排旧计划不迁移。App关闭后的系统推送仍缺真实EAS/FCM配置、注册设备0。原有账号、人设、会话、Provider和.env保留，长期SSH授权沿用；详情见本文末尾2026-10-15最新记录。本轮未commit/push，保留全部既有修改。
+> **最后更新**：2026-10-29（Asia/Shanghai）
+> **当前版本**：客户端1.1.32 / Android34 / iOS34；公网陪伴运行时Agent30。**网页端已上线**：`https://134.175.139.81/` 由网关同源托管（WEB_DIR + /app/web 只读挂载），宽屏（web 且视口 >900px）显示**桌面双栏布局**（左侧常驻对话列表侧栏 288px + 右侧聊天区），窄屏/手机保持全屏单栏堆栈导航，苹果用户 Safari/Chrome 直接使用。**跨设备聊天记录同步已上线**：登录账户下对话同步到服务器（sync_revision 游标 + conversations 表，客户端 last-write-wins + 墓碑删除），网页端与手机 App 共享同一份聊天记录、角色、长期记忆与资料库。网关新增 conversationSyncRoutes.ts / webStatic.ts 与 WEB_DIR 配置；数据库增量建表无迁移。部署备份 `/www/backup/nova-chat-web-sync/20261028T173257Z`，回滚镜像 `nova-chat-gateway:pre-web-sync-20261028T173257Z`。本轮未commit/push，保留全部既有修改。
 
 
 ## 核心产品约定（用户明确要求，后续开发优先读取）
@@ -1772,3 +1772,43 @@ APK 直链：http://192.168.0.113:8790/NovaChat-1.1.8-android-arm64-lan.apk
 - 完整verify1,029项（mobile508/gateway456/scripts65）、类型/lint/build和scoped diff-check通过。真实deepseek-flash使用独立临时库最终11条功能检查通过，round4-review.json为passed-with-observations；前三轮反例保留needs-revision。最终主动样本“那本推理小说叫什么 我最近也想找点东西看”“想起你说回家看书 挑的哪本”。措辞偏直接、惊喜偏平、间接拒绝多一句通用结尾仍是观察项，不能写成完全真人或完美自然。
 - 六份服务端源码已增量上线Agent30：companionAgent.ts/companionBoundary.ts/companionRuntime.ts/companionRelationship.ts/database.ts/provider.ts。Agent文件SHA256 623b7eb7dcfbf0c1705fa2e38d154373275c06996827fa0f65aaa483905b7b32；备份 /www/backup/nova-chat-companion-natural/20261015T102505Z，启动 2026-10-15T10:25:16.217504382Z。构建、运行dist断言、公网health与容器healthy通过；原4账号/5会话/6角色/4完整人设/6外观、Provider与.env核对保留，重启前active jobs均0。未读取私聊或向真人发合成测试消息。
 - 系统云推送仍缺真实EAS/FCM配置，线上设备0，App关闭后提醒未打通；前台12秒轮询可收已有事件。本轮仅服务端，无需新包；公开APK继续1.1.31/code33，服务端原package1.1.28和更新API旧策略未改。详细记录 docs/COMPANION_NATURAL_BOUNDARY_2026-10-15.md，证据 artifacts/companion-natural-proactive-20261015。无commit/push，保留所有既有工作区修改。
+
+## 2026-10-28 网页端上线 + 跨设备聊天记录同步（已部署）
+
+- 用户要求为苹果用户提供网页端并“去服务器全部部署”，网页端须与手机 App 账户/记忆同步。已实现并部署到生产网关 134.175.139.81，公开地址 `https://134.175.139.81/`。
+- 客户端：React Native Web 复用 App 代码，`npm run build:web` 静态导出到 `apps/mobile/dist/web`；宽屏居中单列（>720px maxWidth 768）自适应手机/电脑。网页端同源识别网关地址（`window.location.origin`，`defaultGatewayUrl()` 不依赖 react-native Platform，保持 store 可测试）。
+- 跨设备同步：协议新增 syncedConversationSchema / conversationSyncItemSchema / conversationSyncResponseSchema（.passthrough()，网关只读 id/updatedAt，不解译消息）；网关新增 conversations / sync_revision 表（updated_at 作为单调游标，deleted_at 墓碑）与 GET/PUT/DELETE `/v1/conversations`、POST `/v1/conversations/clear`（legacy 共享口令 403 account_required）。客户端 store 增加 syncAccount/pushRemoteChanges（last-write-wins，3 秒防抖 + 前台/60 秒拉取），`conversationSyncApi.ts` 独立于 gatewayApiClient（不引入 react-native，避免 store 测试破坏）；上传前剥离 voice.localRecording 与 attachments[].uri 本地引用。数据库为增量建表（CREATE TABLE IF NOT EXISTS），无数据迁移。
+- 部署：仅上线 web+sync 所需 6 个文件（protocol index.ts、database.ts、config.ts、server.ts、新增 conversationSyncRoutes.ts/webStatic.ts），未带入工作区既有未提交的 provider apiKeyHint 等其他改动；database.ts 以 HEAD 为基线手工叠加 sync 改动生成（`artifacts/deployment/database-sync-only.ts`）。compose 增加 `WEB_DIR=/app/web` + `./web:/app/web:ro`，web 静态目录 `/www/dyh/nova-chat/web`。镜像重建 `nova-chat-gateway:latest`(3e2d8238f95d) 并 `docker compose up -d` 重建容器。
+- 验证：容器 healthy；health/readyz 正常（database ok/provider configured/defaultModel gpt-5.6-sol）；外网 `https://134.175.139.81/` 返回 index.html、2.8MB JS、SPA 深路由 /chat 200、下载页 /download/ 200；`/v1/conversations` 未登录带版本头 401、无版本头 426（版本门控）；新表 sync_revision/conversations 存在；users=4/provider_rows=1 数据保留；WSS 升级 101。备份 `/www/backup/nova-chat-web-sync/20261028T173257Z`（源码+compose+SQLite 快照），回滚镜像 `nova-chat-gateway:pre-web-sync-20261028T173257Z`。
+- 端到端验收（2026-10-28 补做，已通过）：以临时合成账号（`webtest-*@qa.local`）走真实外网 `https://134.175.139.81/` 全流程——注册 201、登录 200、auth/me 200；同步 GET空/PUT/GET回读/cursor分页/DELETE墓碑/clear 全 200；WSS 聊天真实上游调用成功（model gpt-5.6-sol，input 354 / output 5 tokens）。期间发现我方验收脚本在无 body 的 DELETE/POST 上误带 `content-type: application/json` 触发网关 400 `invalid_request`（Fastify 空 body 解析），为测试脚本问题而非网关缺陷：去掉该头后 DELETE/clear 均 200，真实客户端 `conversationSyncApi.ts`/`gatewayApiClient.ts` 本就在无 body 时不发 content-type，无此问题。验收后已精确清理 3 个合成账号及 generation_jobs/audit_log/会话/游标，线上 users 恢复为 4（原账号零污染）。故“未做真实账号端到端同步”由本次合成账号全链路验收取代；浏览器真实账号登录互通仍由用户最终确认。
+- 未 commit/push，保留工作区既有未提交修改；服务器临时上传 stage 已清理。macOS/Xcode 缺位，iOS 原生安装包仍不可本地构造，网页端即苹果用户当前可用入口。
+
+## 2026-10-29 网页端桌面双栏布局（已部署）
+
+- 用户反馈宽屏网页仍是“手机样式居中窄列”，要求真正的“电脑端适配电脑端、手机端适配手机端”。已把网页改为：web 且视口 `>900px` 时显示**常驻左侧侧栏（288px）+ 右侧聊天区**的双栏布局；窄屏/手机维持原全屏堆栈导航不变。登录页不登入时仍居中（卡片 maxWidth 480 自居中）。
+- 实现：新增 `apps/mobile/src/components/DesktopSidebar.tsx`（复用 store 的 conversations/setActiveConversation/newConversation/clearSession，列正常对话 + 新对话按钮 + AI陪伴/资料库/收藏夹/设置/关于导航 + 底部账户与退出）；`App.tsx` 把 `wideWeb>720 居中单列` 改为 `desktop = Platform.OS==='web' && width>900`，并把 Stack.Navigator 抽成 `navigator` 变量，`authenticated && desktop` 时渲染 `<desktopShell(flex row)> = DesktopSidebar + <desktopContent(flex 1, minWidth 0)>`，否则渲染全屏 `root`；CredentialNotice 上移到最外层全宽。typecheck/lint/515 测试全过；`expo export` 新 bundle `index-d20a9625dfb36595bac282ba52906607.js`（2.8MB，含 DesktopSidebar 与 desktopShell/desktopContent 逻辑）。
+- 部署：tar+scp 到服务器 `/tmp/nova-web-desktop.tar.gz`，备份旧 web 到 `/www/backup/nova-chat-web-desktop/20261029T015537Z/web`，替换 `/www/dyh/nova-chat/web`（41 文件）。**踩坑**：首次用 `rm -rf $WEB; mkdir $WEB` 替换绑载目录导致容器内 `/app/web` 变空、网关返回“网页未部署”——bind mount 按旧 inode 挂载；修复为 `docker compose up -d --force-recreate gateway` 重建容器重新建立挂载。教训：**以后替换挂载目录内容必须保留目录本身，用 `find $WEB -mindepth 1 -delete` 清空再复制，禁止 `rm -rf` 挂载目录**。
+- 验证：容器 healthy；`https://134.175.139.81/` 200；新 JS 200（text/javascript 2.8MB）；health 正常 defaultModel gpt-5.6-sol；users=4 数据保留；sync 表 2/2。未 commit/push；邮箱验证注册 + 图形验证码用户已明确“等一下再做”，发件邮箱 3398485794@qq.com 的 SMTP 授权码尚未提供。
+
+## 2026-10-29 网页端两个 bug 修复（已部署）
+
+- 用户报两处：① 网页顶部有一条红色错误横幅“好影响页面”；② 电脑端聊天输入框按回车不能发送。
+- 根因 ①：`expo-secure-store` 在 web 不可用（原生 Keychain/Keystore），`credentialStorage.ts` 把 SecureStore 当 secret 存储，web 上 `getItemAsync/setItemAsync` 抛错 → `credentialError` → 顶部 CredentialNotice 红条（“无法读取登录凭据…”/“登录凭据未可靠保存…”）。
+- 修复 ①：按既有 `snapshotStorage` 模式拆平台——`credentialStorage.ts`（默认=web+测试）改用 AsyncStorage（localStorage）同时作 fence 与 secret（`webSecret` 适配 `getItemAsync/setItemAsync/deleteItemAsync` → AsyncStorage 的 getItem/setItem/removeItem）；新增 `credentialStorage.native.ts` 维持 SecureStore 安全存储。store 内 line528 的 `SecureStore.deleteItemAsync('nova-chat-direct-api-key')` 仍在 try/catch 内，web 上抛错被吞无害。
+- 根因 ②：Composer 的 TextInput `multiline` 在 react-native-web 渲染成 `<textarea>`，Enter 只插入换行、`onSubmitEditing` 不触发；`submitBehavior="submit"` 是 RN 原生行为、RNW 不实现。读 RNW TextInput 源码确认 `handleKeyDown` 先调 `onKeyPress(e)`，多行时 `(blurOnSubmit || !multiline)` 为假故不提交。
+- 修复 ②：Composer TextInput 加 `onKeyPress`（仅 `Platform.OS==='web'` 时处理）：`key==='Enter' && !shiftKey` 时 `event.preventDefault()`（阻止换行）+ `submit()`；Shift+Enter 仍换行。native 保持 submitBehavior/submit + onSubmitEditing 不变。
+- 3 个测试文件因 credentialStorage 默认改 AsyncStorage 而需显式走 native 版：`gatewayUpgrade.test.ts`/`nativePersistence.test.ts`/`storePersistence.test.ts` 各加 `vi.mock('../src/services/credentialStorage', async () => import('../src/services/credentialStorage.native'))`。typecheck/lint/515 测试全过。
+- 部署：`artifacts/deployment/deploy-web.sh`（**用 `find $WEB -mindepth 1 -delete` 清空挂载目录内容、绝不 `rm -rf` 挂载目录**，替换后无需重建容器）→ tar+scp+替换；备份 `/www/backup/nova-chat-web-desktop/20261029T021305Z/web`。新 bundle `index-cf448705f9839856d3c753a614badbd6.js`（200，2.8MB）；容器 healthy、web root 200、users=4、sync 2/2。未 commit/push。
+
+## 2026-10-29 登录页正式版精简（已部署）
+
+- 用户要求“正式版发布（app+web），登录页那些不需要的、影响体验的文字都去掉”。两张截图经细粒度 ASCII 还原确认为：① 绿色英文标语 `A PLACE FOR YOUR THOUGHTS`（kicker）；② 卡片下方的 `重新连接服务器` + `服务器连接设置` 两个技术链接。
+- 修改 `LoginScreen.tsx`：删除 kicker、`gatewayNotice`（“服务器已预设/测试服务已预设/请使用下方服务器连接设置…”技术提示）、服务器连接设置 UI（`showServerSettings` 状态 + serverRow/testButton 输入区）、以及底部 `重新连接服务器`/`服务器连接设置` 两个链接；`inspectServer` 成功时不再显示“服务器已连接，可以登录或注册”这类冗长提示（仅 needsBootstrap / providerConfigured===false 时才提示）；相应文案改为中性（“服务器尚未连接，请检查网络后重试”）；清理 kicker/serverRow/serverInput/testButton/testText/gatewayNotice/gatewayNoticeText/serverSettingsLink/serverSettingsText 等无用样式，title 上边距 5→16 补回间距。保留 logo/Nova/版本号/副标语/信任胶囊/登录注册 tab/表单。
+- web 端 `EXPO_PUBLIC_GATEWAY_URL` 为空时登录页仍能自动连网：store 的 `defaultGatewayUrl()` 在 web 返回 `window.location.origin`，LoginScreen 的 `initialServerUrl = BUILT_IN || settings.serverUrl` 即同源地址，故删掉手动配置 UI 不影响 web 自动连接。
+- typecheck/lint/515 测试全过；`expo export` 新 bundle `index-1bd83ff2dd0dfb1f6ecbe96e89921d31.js`；`deploy-web.sh` 原地替换（find -delete 保挂载）；备份 `/www/backup/nova-chat-web-desktop/20261029T022831Z/web`；容器 healthy、web root 200、users=4、sync 2/2。未 commit/push。
+
+## 2026-10-29 消息下方操作按钮紧凑化（已部署）
+
+- 用户反馈“消息回复下面的复制/创建分支/收藏/朗读/重新生成这些太占地方，排版要改”。这些按钮位于 `MessageBubble.tsx` 的 `modelMeta`（“回答详情”行）与 `actions` 行。
+- 紧凑化：`modelMeta` minHeight 40/paddingVertical 8 → 26/3；`actions` 去掉 minHeight 38、gap 8→6；`actionButton` minHeight 36/borderRadius 18/padding 11/6 → 28/14/padding 9/4、gap 5→4；`actionText` fontSize 11→10；移除“创建分支”“编辑”按钮上的内联 `minHeight:44` 覆盖（统一走 28 高）。每条已完成回复下方约占位从 ~78px 降到 ~54px。
+- typecheck/lint/515 测试全过；`expo export` 新 bundle `index-12bc3a4c5bb0ddceabbe957c28359cde.js`；部署备份 `/www/backup/nova-chat-web-desktop/20261029T023346Z/web`；容器 healthy、web root 200、users=4、sync 2/2。未 commit/push。

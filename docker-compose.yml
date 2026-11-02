@@ -10,10 +10,13 @@ services:
     environment:
       NODE_ENV: production
       DATA_DIR: /app/data
+      WEB_DIR: /app/web
     ports:
       - "${GATEWAY_BIND_ADDRESS:-0.0.0.0}:${GATEWAY_PORT:-8787}:8787"
     volumes:
       - nova-chat-data:/app/data
+      # Web client (Expo static export). Build with `npm run build:web` first.
+      - ./apps/mobile/dist/web:/app/web:ro
     # The application writes only to /app/data; keep the container root immutable.
     read_only: true
     tmpfs:

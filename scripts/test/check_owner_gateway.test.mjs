@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { checkOwnerGateway } from '../check_owner_gateway.mjs';
+import { currentAppVersionHeaders } from '../app_version.mjs';
 const address = 'https://8.8.8.8';
 const setup = { needsBootstrap: true, bootstrapTokenRequired: true, registrationEnabled: false, providerConfigured: false };
 const mocked = (status = setup, protectedCode = 401) => async url => url.endsWith('/v1/tools')
@@ -24,8 +25,7 @@ test('owner test does not trust remote metadata or suppress TLS failures', async
 
 test('owner checks send the current client version through the app upgrade gate', async () => {
   const result = await checkOwnerGateway(address, { fetchImpl: async (url, options) => {
-    assert.equal(options.headers['x-nova-app-version'], '1.1.32');
-    assert.equal(options.headers['x-nova-app-version-code'], '34');
+    assert.deepEqual(options.headers, currentAppVersionHeaders);
     return mocked()(url);
   } });
   assert.equal(result.audience, 'server-owner-test');

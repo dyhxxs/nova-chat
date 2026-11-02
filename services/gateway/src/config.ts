@@ -68,6 +68,7 @@ const configSchema = z.object({
   TOOL_TIMEOUT_MS: numberFromEnv(12_000).refine((value) => value >= 100 && value <= 60_000, 'TOOL_TIMEOUT_MS must be between 100 and 60000'),
   BRAVE_SEARCH_API_KEY: z.string().default(''),
   MAX_FILE_BYTES: numberFromEnv(25 * 1024 * 1024),
+  WEB_DIR: z.string().default(''),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -152,5 +153,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     defaultTimezone: config.DEFAULT_TIMEZONE,
     toolTimeoutMs: config.TOOL_TIMEOUT_MS,
     braveSearchApiKey: config.BRAVE_SEARCH_API_KEY,
+    webDir: config.WEB_DIR ? path.resolve(config.WEB_DIR) : '',
   } as const;
 }

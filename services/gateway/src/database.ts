@@ -42,7 +42,20 @@ export type ProviderSettings = {
   allowedModels: string[];
   updatedAt?: number;
 };
-export type PublicProviderSettings = Omit<ProviderSettings, 'apiBaseUrl' | 'apiKey'> & { apiBaseUrl: ''; apiBaseUrlSet: boolean; apiKeySet: boolean };
+export type PublicProviderSettings = Omit<ProviderSettings, 'apiKey'> & { apiBaseUrlSet: boolean; apiKeySet: boolean; apiKeyHint: string };
+export type VoiceProviderSettings = {
+  apiBaseUrl: string;
+  apiKey: string;
+  ttsModel: string;
+  asrModel: string;
+  defaultVoiceId: string;
+  updatedAt?: number;
+};
+export type PublicVoiceProviderSettings = Omit<VoiceProviderSettings, 'apiKey'> & {
+  apiBaseUrlSet: boolean;
+  apiKeySet: boolean;
+  apiKeyHint: string;
+};
 export type StoredFile = {
   id: string;
   userId: string;
@@ -87,10 +100,20 @@ type FileRow = {
 };
 
 const DATABASE_SCHEMA_VERSION = 1;
+// Cross-device conversation sync bounds. A conversation is an opaque client
+// payload; these caps only guard against oversized writes and unbounded growth.
+const MAX_SYNCED_CONVERSATION_BYTES = 8 * 1024 * 1024;
+const MAX_SYNCED_CONVERSATIONS = 10_000;
 
 function id(): string { return randomUUID(); }
 function tokenHash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function normalizeEmail(value: string): string { return value.trim().toLowerCase(); }
+/** Masked key hint so administrators can recognize which key is saved without exposing the secret. */
+function apiKeyHint(secret: string): string {
+  if (!secret) return '';
+  if (secret.length <= 8) return '••••••';
+  return `${secret.slice(0, 6)}…${secret.slice(-4)}`;
+}
 function userFromRow(row: UserRow): UserRecord {
   return {
     id: row.id,
@@ -258,6 +281,9 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS companion_provider_settings (
         purpose TEXT PRIMARY KEY CHECK(purpose IN ('chat','image')), settings_encrypted TEXT NOT NULL, updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS voice_provider_settings (
+        id INTEGER PRIMARY KEY CHECK(id = 1), settings_encrypted TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT
+      );
       CREATE TABLE IF NOT EXISTS voice_jobs (
         user_id TEXT NOT NULL, request_id TEXT NOT NULL, snapshot_json TEXT NOT NULL,
         PRIMARY KEY(user_id, request_id)
@@ -338,6 +364,19 @@ export class AppDatabase {
         target TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS sync_revision (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS conversations (
+        conversation_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        payload_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        PRIMARY KEY (user_id, conversation_id)
+      );
+      CREATE INDEX IF NOT EXISTS conversations_cursor_idx ON conversations(user_id, updated_at);
     `);
     const relationshipColumns = this.db.prepare('PRAGMA table_info(companion_relationships)').all() as Array<{ name: string }>;
     if (!relationshipColumns.some(column => column.name === 'interaction_days')) this.db.exec('ALTER TABLE companion_relationships ADD COLUMN interaction_days INTEGER NOT NULL DEFAULT 0');
@@ -567,17 +606,20 @@ export class AppDatabase {
   }
 
   getPublicProviderSettings(): PublicProviderSettings {
+    const saved = Boolean(this.db.prepare('SELECT id FROM provider_settings WHERE id=1').get());
     const settings = this.getProviderSettings();
     return {
-      // Empty compatibility sentinel lets older administrator forms save without exposing the URL.
-      apiBaseUrl: '',
+      // Only a row saved by an administrator is disclosed; environment fallback
+      // stays hidden (URL blanked, no key hint) to avoid leaking operator config.
+      apiBaseUrl: saved ? settings.apiBaseUrl : '',
       apiBaseUrlSet: Boolean(settings.apiBaseUrl),
+      apiKeySet: Boolean(settings.apiKey),
+      apiKeyHint: saved ? apiKeyHint(settings.apiKey) : '',
       apiMode: settings.apiMode,
       authMode: settings.authMode,
       defaultModel: settings.defaultModel,
       allowedModels: settings.allowedModels,
       updatedAt: settings.updatedAt,
-      apiKeySet: Boolean(settings.apiKey),
     };
   }
 
@@ -597,6 +639,57 @@ export class AppDatabase {
     return this.getPublicProviderSettings();
   }
 
+  getVoiceProviderSettings(): VoiceProviderSettings {
+    const row = this.db.prepare('SELECT settings_encrypted, updated_at FROM voice_provider_settings WHERE id=1').get() as { settings_encrypted: string; updated_at: number } | undefined;
+    if (!row) return {
+      apiBaseUrl: this.config.voiceBaseUrl ?? '',
+      apiKey: this.config.voiceApiKey,
+      ttsModel: this.config.voiceTtsModel,
+      asrModel: this.config.voiceAsrModel,
+      defaultVoiceId: this.config.voiceDefaultId,
+    };
+    return { ...JSON.parse(this.decrypt(row.settings_encrypted)), updatedAt: row.updated_at } as VoiceProviderSettings;
+  }
+
+  publicVoiceProviderSettings(): PublicVoiceProviderSettings {
+    const saved = Boolean(this.db.prepare('SELECT id FROM voice_provider_settings WHERE id=1').get());
+    const settings = this.getVoiceProviderSettings();
+    return {
+      // Environment fallback remains usable by the gateway but is never echoed to the admin client.
+      apiBaseUrl: saved ? settings.apiBaseUrl : '',
+      apiBaseUrlSet: Boolean(settings.apiBaseUrl),
+      apiKeySet: Boolean(settings.apiKey),
+      apiKeyHint: saved ? apiKeyHint(settings.apiKey) : '',
+      ttsModel: settings.ttsModel,
+      asrModel: settings.asrModel,
+      defaultVoiceId: settings.defaultVoiceId,
+      updatedAt: settings.updatedAt,
+    };
+  }
+
+  updateVoiceProviderSettings(input: Omit<VoiceProviderSettings, 'apiBaseUrl' | 'apiKey' | 'updatedAt'> & { apiBaseUrl?: string; apiKey?: string }, actorUserId: string): PublicVoiceProviderSettings {
+    const current = this.getVoiceProviderSettings();
+    const apiBaseUrl = (input.apiBaseUrl?.trim() || current.apiBaseUrl).replace(/\/+$/, '');
+    const replacementKey = input.apiKey?.trim();
+    if (!apiBaseUrl || !(replacementKey || current.apiKey)) throw new ProviderSettingsUpdateError('请填写语音服务地址和密钥。');
+    const changedDestination = apiBaseUrl !== current.apiBaseUrl.replace(/\/+$/, '');
+    if (changedDestination && current.apiKey && !replacementKey) throw new ProviderSettingsUpdateError('更换语音服务地址时必须同时填写新的密钥。');
+    const value: VoiceProviderSettings = {
+      apiBaseUrl,
+      apiKey: replacementKey || current.apiKey,
+      ttsModel: input.ttsModel.trim(),
+      asrModel: input.asrModel.trim(),
+      defaultVoiceId: input.defaultVoiceId.trim(),
+    };
+    if (!value.ttsModel || !value.asrModel || !value.defaultVoiceId) throw new ProviderSettingsUpdateError('语音模型和默认音色不能为空。');
+    const now = Date.now();
+    this.db.prepare(`INSERT INTO voice_provider_settings(id,settings_encrypted,updated_at,updated_by) VALUES(1,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET settings_encrypted=excluded.settings_encrypted,updated_at=excluded.updated_at,updated_by=excluded.updated_by`)
+      .run(this.encrypt(JSON.stringify(value)), now, actorUserId);
+    this.audit(actorUserId, 'voice.provider.update', 'voice');
+    return this.publicVoiceProviderSettings();
+  }
+
   getCompanionProviderSettings(purpose: 'chat' | 'image'): ProviderSettings {
     const row = this.db.prepare('SELECT settings_encrypted, updated_at FROM companion_provider_settings WHERE purpose=?').get(purpose) as { settings_encrypted: string; updated_at: number } | undefined;
     return row ? { ...JSON.parse(this.decrypt(row.settings_encrypted)), updatedAt: row.updated_at } : {
@@ -606,7 +699,7 @@ export class AppDatabase {
 
   publicCompanionProviderSettings(purpose: 'chat' | 'image'): PublicProviderSettings {
     const value = this.getCompanionProviderSettings(purpose);
-    return { apiBaseUrl: '', apiBaseUrlSet: Boolean(value.apiBaseUrl), apiKeySet: Boolean(value.apiKey), apiMode: value.apiMode,
+    return { apiBaseUrl: value.apiBaseUrl, apiBaseUrlSet: Boolean(value.apiBaseUrl), apiKeySet: Boolean(value.apiKey), apiKeyHint: apiKeyHint(value.apiKey), apiMode: value.apiMode,
       authMode: value.authMode, defaultModel: value.defaultModel, allowedModels: value.allowedModels, updatedAt: value.updatedAt };
   }
 
@@ -1090,5 +1183,88 @@ export class AppDatabase {
       target: row.target,
       createdAt: row.created_at,
     }));
+  }
+
+  syncRevision(userId: string): number {
+    const row = this.db.prepare('SELECT revision FROM sync_revision WHERE user_id=?').get(userId) as { revision: number } | undefined;
+    return row ? Number(row.revision) : 0;
+  }
+
+  private bumpSyncRevision(userId: string): number {
+    const row = this.db.prepare('SELECT revision FROM sync_revision WHERE user_id=?').get(userId) as { revision: number } | undefined;
+    const next = (row ? Number(row.revision) : 0) + 1;
+    this.db.prepare('INSERT INTO sync_revision(user_id,revision) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET revision=excluded.revision').run(userId, next);
+    return next;
+  }
+
+  saveSyncedConversation(userId: string, conversationId: string, payload: unknown): number {
+    const json = JSON.stringify(payload);
+    if (Buffer.byteLength(json, 'utf8') > MAX_SYNCED_CONVERSATION_BYTES) {
+      throw new Error('Synced conversation exceeds the per-conversation size limit');
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const count = this.db.prepare('SELECT COUNT(*) AS count FROM conversations WHERE user_id=? AND deleted_at IS NULL').get(userId) as { count: number };
+      const active = this.db.prepare('SELECT 1 FROM conversations WHERE user_id=? AND conversation_id=? AND deleted_at IS NULL').get(userId, conversationId);
+      if (!active && Number(count.count) >= MAX_SYNCED_CONVERSATIONS) {
+        throw new Error('Synced conversation count limit reached');
+      }
+      const revision = this.bumpSyncRevision(userId);
+      this.db.prepare(`INSERT INTO conversations(conversation_id,user_id,payload_json,updated_at,deleted_at)
+        VALUES(?,?,?,?,NULL)
+        ON CONFLICT(user_id,conversation_id) DO UPDATE SET payload_json=excluded.payload_json,updated_at=excluded.updated_at,deleted_at=NULL`)
+        .run(conversationId, userId, json, revision);
+      this.db.exec('COMMIT');
+      return revision;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  deleteSyncedConversation(userId: string, conversationId: string): number | undefined {
+    if (!this.db.prepare('SELECT 1 FROM conversations WHERE user_id=? AND conversation_id=? AND deleted_at IS NULL').get(userId, conversationId)) return undefined;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const revision = this.bumpSyncRevision(userId);
+      this.db.prepare('UPDATE conversations SET updated_at=?, deleted_at=1 WHERE user_id=? AND conversation_id=?').run(revision, userId, conversationId);
+      this.db.exec('COMMIT');
+      return revision;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  clearSyncedConversations(userId: string): { revision: number; deleted: number } {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const revision = this.bumpSyncRevision(userId);
+      const result = this.db.prepare('UPDATE conversations SET updated_at=?, deleted_at=1 WHERE user_id=? AND deleted_at IS NULL').run(revision, userId);
+      this.db.exec('COMMIT');
+      return { revision, deleted: Number(result.changes) };
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  listSyncedConversations(userId: string, afterRevision: number): {
+    items: Array<{ id: string; updatedAt: number; deleted: boolean; conversation?: unknown }>;
+    cursor: number;
+  } {
+    const rows = this.db.prepare('SELECT conversation_id,payload_json,updated_at,deleted_at FROM conversations WHERE user_id=? AND updated_at>? ORDER BY updated_at ASC')
+      .all(userId, Math.max(0, Math.trunc(afterRevision))) as Array<{ conversation_id: string; payload_json: string; updated_at: number; deleted_at: number | null }>;
+    const items = rows.map((row) => {
+      let conversation: unknown;
+      try { conversation = JSON.parse(row.payload_json); } catch { /* A corrupt payload is still surfaced as a tombstone so clients can drop it. */ }
+      return {
+        id: row.conversation_id,
+        updatedAt: row.updated_at,
+        deleted: row.deleted_at !== null,
+        ...(row.deleted_at === null && conversation !== undefined ? { conversation } : {}),
+      };
+    });
+    return { items, cursor: this.syncRevision(userId) };
   }
 }

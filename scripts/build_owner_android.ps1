@@ -35,7 +35,11 @@ try {
   $gatewayUri = [Uri]$verifiedGateway
   $usesCleartext = $gatewayUri.Scheme -eq 'http'
   if ($usesCleartext -and -not $AllowHttpIp) { throw 'HTTP 公网 IP 构建必须显式指定 -AllowHttpIp。' }
-  $env:ALLOW_CLEARTEXT = if ($usesCleartext) { 'true' } else { 'false' }
+  if ($usesCleartext) {
+    $env:ALLOW_CLEARTEXT = 'true'
+  } else {
+    $env:ALLOW_CLEARTEXT = 'false'
+  }
   if ($usesCleartext) { Write-Warning '当前构建使用公网 IP + HTTP；Android/iOS 明文网络已显式开启，Session 会以明文传输。' }
   if (-not $env:ANDROID_HOME) { $env:ANDROID_HOME = 'D:\Android\Sdk' }
   $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
@@ -84,3 +88,6 @@ try {
 } finally {
   foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $original[$name], 'Process') }
 }
+
+
+

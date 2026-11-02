@@ -294,6 +294,8 @@ export const generateRequestSchema = z.object({
   /** Preferred persisted companion reference. The inline context remains for backwards compatibility. */
   companionId: z.string().uuid().optional(),
   companionAction: z.enum(['chat', 'photo']).optional(),
+  /** Marks a request that must remain a text-only language-learning turn. */
+  languageLearning: z.boolean().optional(),
   companion: companionContextSchema.optional(),
 });
 export type GenerateRequest = z.infer<typeof generateRequestSchema>;
@@ -382,3 +384,37 @@ export const knowledgeImportInfoSchema = z.object({
   format: z.literal('pdf'), pages: z.number().int().min(1).max(200),
   pagesWithoutText: z.array(z.number().int().min(1).max(200)).max(200),
 }).refine(value => value.pagesWithoutText.every(page => page <= value.pages) && new Set(value.pagesWithoutText).size === value.pagesWithoutText.length);
+
+/**
+ * Cross-device conversation sync. A conversation is the client's own payload:
+ * the gateway stores and returns it verbatim and only interprets `id` (the
+ * sync key) and `updatedAt` (last-write-wins on the client). Message contents
+ * are never validated or inspected server-side.
+ */
+export const syncedConversationSchema = z.object({
+  id: z.string().trim().min(1).max(200),
+  updatedAt: z.number().int().min(0).max(8_640_000_000_000_000),
+}).passthrough();
+export type SyncedConversation = z.infer<typeof syncedConversationSchema>;
+
+/** One entry returned by the sync endpoint. `deleted` marks a remote tombstone. */
+export const conversationSyncItemSchema = z.object({
+  id: z.string().trim().min(1).max(200),
+  updatedAt: z.number().int().min(0).max(8_640_000_000_000_000),
+  deleted: z.boolean().optional(),
+  conversation: z.unknown().optional(),
+});
+export type ConversationSyncItem = z.infer<typeof conversationSyncItemSchema>;
+
+export const conversationSyncResponseSchema = z.object({
+  items: z.array(conversationSyncItemSchema).max(10_000),
+  cursor: z.number().int().nonnegative(),
+});
+export type ConversationSyncResponse = z.infer<typeof conversationSyncResponseSchema>;
+
+/** Batch clear body so a client can erase all remote conversations at once. */
+export const conversationClearResponseSchema = z.object({
+  ok: z.literal(true),
+  deleted: z.number().int().nonnegative(),
+  cursor: z.number().int().nonnegative(),
+});

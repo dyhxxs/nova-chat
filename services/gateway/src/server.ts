@@ -1,6 +1,7 @@
 import { CompanionChatQueue, completedCompanionContext } from './companionChatQueue.js';
 import { CompanionPushRuntime } from './companionPush.js';
 import { registerVoiceRoutes } from './voiceRoutes.js';
+import { registerLanguageLearningRoutes } from './languageLearningRoutes.js';
 import { registerKnowledgeRoutes } from './knowledgeRoutes.js';
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
@@ -40,6 +41,8 @@ import { companionPhotoIntent } from './companionPhoto.js';
 import { companionResponseDecision } from './companionResponseDecision.js';
 import { analyzeCompanionTurn } from './companionState.js';
 import { CompanionRuntime } from './companionRuntime.js';
+import { registerConversationSyncRoutes } from './conversationSyncRoutes.js';
+import { registerWebStatic } from './webStatic.js';
 import { APP_VERSION_CODE_HEADER, appUpdatePolicy, requiresAppUpdate, upgradeRequiredError } from './appUpdate.js';
 import { GatewayMetrics, REQUEST_ID_HEADER, requestIdFromHeader } from './observability.js';
 
@@ -72,6 +75,17 @@ const userPatchSchema = z.object({
 }).refine((value) => Object.keys(value).length > 0, { message: 'No changes supplied' });
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
 const jobScopeSchema = z.object({ conversationId: z.string().uuid() });
+
+const voiceProviderSchema = z.object({
+  apiBaseUrl: z.union([z.literal(''), z.string().trim().url().max(2048).refine((value) => {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
+  })]).optional(),
+  apiKey: z.string().max(4096).optional(),
+  ttsModel: z.string().trim().min(1).max(120),
+  asrModel: z.string().trim().min(1).max(120),
+  defaultVoiceId: z.string().trim().min(1).max(120),
+});
 
 const providerSchema = z.object({
   apiBaseUrl: z.union([z.literal(''), z.string().trim().url().max(2048).refine((value) => {
@@ -756,6 +770,24 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     }
   });
 
+  app.get('/v1/admin/voice-provider', async (request, reply) => {
+    if (!requireAdmin(request, reply)) return;
+    return { provider: database.publicVoiceProviderSettings() };
+  });
+
+  app.put('/v1/admin/voice-provider', async (request, reply) => {
+    const principal = requireAdmin(request, reply);
+    if (!principal) return;
+    const parsed = voiceProviderSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: { code: 'invalid_request', message: '语音服务配置不正确。', retryable: false } });
+    try {
+      return { provider: database.updateVoiceProviderSettings(parsed.data, principal.id) };
+    } catch (error) {
+      const publicError = toPublicError(error);
+      return reply.code(publicError.statusCode).send({ error: publicError });
+    }
+  });
+
   app.get('/v1/admin/provider', async (request, reply) => {
     if (!requireAdmin(request, reply)) return;
     return { provider: database.getPublicProviderSettings() };
@@ -804,7 +836,9 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   });
 
   registerKnowledgeRoutes(app, database, requireUser);
+  registerLanguageLearningRoutes(app, database, config, provider, requireUser);
   registerVoiceRoutes(app, database, config, requireUser);
+  registerConversationSyncRoutes(app, database, requireUser);
 
   app.post('/v1/files', async (request, reply) => {
     const principal = requireUser(request, reply);
@@ -1246,6 +1280,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
     sockets.close();
     database.close();
   });
+
+  // Same-origin web client (optional). Registered last so the API and health
+  // routes above always take precedence over the SPA wildcard.
+  registerWebStatic(app, config.webDir);
 
   return app;
 }

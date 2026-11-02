@@ -9,7 +9,7 @@ vi.mock('../src/store/useAppStore', async () => { const { create } = await impor
 vi.mock('../src/services/gatewayApiClient', () => ({ getCompanionProviderSettings: mocks.get, saveCompanionProviderSettings: mocks.save, testCompanionProvider: mocks.test }));
 import { CompanionProviderSection } from '../src/components/CompanionProviderSection';
 import { useAppStore } from '../src/store/useAppStore';
-const metadata = { apiBaseUrlSet: true, apiKeySet: true, apiMode: 'chat-completions', authMode: 'bearer', defaultModel: 'deepseek-chat', allowedModels: ['deepseek-chat'], apiBaseUrl: 'https://legacy-private.example', apiKey: 'legacy-secret' };
+const metadata = { apiBaseUrlSet: true, apiKeySet: true, apiKeyHint: 'sk-leg…1234', apiMode: 'chat-completions', authMode: 'bearer', defaultModel: 'deepseek-chat', allowedModels: ['deepseek-chat'], apiBaseUrl: 'https://legacy-private.example', apiKey: 'legacy-secret' };
 const onBlur = (callback: () => void) => { mocks.blur.add(callback); return () => mocks.blur.delete(callback); };
 let root: ReactTestRenderer | undefined;
 const inputs = () => root!.root.findAll(node => String(node.type) === 'TextInput');
@@ -19,12 +19,12 @@ async function mount() { await act(async () => { root = create(createElement(Com
 beforeEach(() => { vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); mocks.get.mockReset().mockResolvedValue(metadata); mocks.save.mockReset().mockResolvedValue(metadata); mocks.test.mockReset().mockResolvedValue(['deepseek-chat', 'deepseek-reasoner']); mocks.app.clear(); mocks.blur.clear(); useAppStore.setState({ accessToken: 'qa-session', user: { role: 'admin' }, settings: { serverUrl: 'https://gateway.test' } } as any); });
 afterEach(async () => { if (root) await act(async () => root!.unmount()); root = undefined; vi.unstubAllGlobals(); });
 describe('independent companion credential form', () => {
- it('never renders returned credentials and masks both write-only fields', async () => { await mount(); expect(inputs().slice(0, 2).map(input => input.props.value)).toEqual(['', '']); for (const input of inputs().slice(0, 2)) expect(input.props.secureTextEntry).toBe(true); expect(text()).not.toContain('legacy-secret'); expect(text()).not.toContain('legacy-private'); });
+ it('shows the saved URL and masked key hint, never the full key', async () => { await mount(); expect(inputs()[0]!.props.value).toBe('https://legacy-private.example'); expect(inputs()[0]!.props.secureTextEntry).toBe(false); expect(inputs()[1]!.props.value).toBe(''); expect(inputs()[1]!.props.secureTextEntry).toBe(true); expect(text()).toContain('sk-leg…1234'); expect(text()).not.toContain('legacy-secret'); });
  it('saves only the selected purpose and clears secrets before switching routes', async () => { await mount(); await act(async () => { inputs()[0]!.props.onChangeText('https://new.example/v1'); inputs()[1]!.props.onChangeText('new-test-key'); }); await act(async () => button('保存聊天配置').props.onPress()); expect(mocks.save).toHaveBeenCalledWith('https://gateway.test', 'qa-session', 'chat', expect.objectContaining({ apiKey: 'new-test-key', defaultModel: 'deepseek-chat' })); expect(inputs()[1]!.props.value).toBe(''); await act(async () => button('陪伴照片').props.onPress()); expect(mocks.get).toHaveBeenLastCalledWith('https://gateway.test', 'qa-session', 'image'); expect(inputs()[1]!.props.value).toBe(''); });
  it.each(['blur', 'background'])('clears drafts on %s and ignores late saves', async event => { let resolve!: (value: typeof metadata) => void; mocks.save.mockReturnValue(new Promise(done => { resolve = done; })); await mount(); await act(async () => inputs()[1]!.props.onChangeText('draft-secret')); await act(async () => { button('保存聊天配置').props.onPress(); }); await act(async () => { if (event === 'blur') for (const cb of mocks.blur) cb(); else for (const cb of mocks.app) cb('background'); }); expect(inputs()[1]!.props.value).toBe(''); await act(async () => resolve(metadata)); expect(text()).not.toContain('已保存，'); expect(inputs()[1]!.props.value).toBe(''); });
  it('queries only the companion route and saves the administrator-selected model after explicit save', async () => {
    await mount(); await act(async () => button('获取可用模型并选择').props.onPress());
-   expect(mocks.test).toHaveBeenCalledWith('https://gateway.test', 'qa-session', 'chat', { apiMode: 'chat-completions', authMode: 'bearer' });
+   expect(mocks.test).toHaveBeenCalledWith('https://gateway.test', 'qa-session', 'chat', { apiBaseUrl: 'https://legacy-private.example', apiMode: 'chat-completions', authMode: 'bearer' });
    expect(mocks.save).not.toHaveBeenCalled();
    await act(async () => button('deepseek-reasoner').props.onPress());
    expect(inputs()[2]!.props.value).toBe('deepseek-reasoner');

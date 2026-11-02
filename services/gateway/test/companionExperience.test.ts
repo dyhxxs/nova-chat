@@ -36,7 +36,10 @@ describe('independent companion experience', () => {
   it('uses the administrator chat route, hides model metadata, and ignores ordinary user controls', async () => {
     const c = await config(); const app = await appWith(c); const owner = await auth(app);
     const saved = await app.inject({ method: 'PUT', url: '/v1/admin/companion-provider/chat', headers: bearer(owner.accessToken), payload: route('chat') }); expect(saved.statusCode).toBe(200);
-    const publicConfig = JSON.stringify(saved.json()); expect(publicConfig).not.toContain('chat-secret'); expect(publicConfig).not.toContain('chat.companion.example');
+    const publicConfig = JSON.stringify(saved.json()); expect(publicConfig).not.toContain('chat-secret');
+    expect(saved.json().provider.apiBaseUrl).toBe('https://chat.companion.example/v1');
+    expect(saved.json().provider.apiKeyHint).toBe('chat-s…cret');
+    expect(saved.json().provider).not.toHaveProperty('apiKey');
     const profiles = await app.inject({ method: 'GET', url: '/v1/companions', headers: bearer(owner.accessToken) });
     const input = request(profiles.json().companions.find((p: { name: string }) => p.name === 'Lumi').id);
     input.messages = [{ role: 'user', content: '下班了', attachments: [] }, { role: 'assistant', content: '回家了吗？', attachments: [] }, { role: 'user', content: '刚吃完饭', attachments: [] }];

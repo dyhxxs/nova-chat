@@ -38,6 +38,12 @@ artifacts/*
 /artifacts_mumu*.png
 /mumu_window*.xml
 
+# Ad-hoc local scratch files (probe output, OCR dumps, loose screenshots)
+/NUL;
+/image.png
+/ocr_result.json
+/.tmp-gw-test/
+
 # Python bytecode caches
 __pycache__/
 *.pyc

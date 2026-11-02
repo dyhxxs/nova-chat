@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { formatDiagnosticReport, runConnectionDiagnostics } from '../src/services/connectionDiagnostics';
+import { APP_VERSION, APP_VERSION_CODE } from '../src/lib/appUpdate';
 const input = { serverUrl: 'https://private-gateway.example/nova', accessToken: 'test-session-token', deviceId: 'test-device-id' };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status });
 class FakeSocket {
@@ -22,14 +23,14 @@ describe('privacy-safe connection diagnostics', () => {
     const report = await runConnectionDiagnostics(input);
     expect(report.steps.map((step) => step.status)).toEqual(['ok', 'ok', 'ok', 'ok']);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([input.serverUrl + '/health', input.serverUrl + '/v1/models']);
-    expect(fetchMock.mock.calls[0]![1].headers).toEqual({ 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34' });
-    expect(fetchMock.mock.calls[1]![1].headers).toEqual({ 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34', authorization: 'Bearer ' + input.accessToken });
+    expect(fetchMock.mock.calls[0]![1].headers).toEqual({ 'x-nova-app-version': APP_VERSION, 'x-nova-app-version-code': String(APP_VERSION_CODE) });
+    expect(fetchMock.mock.calls[1]![1].headers).toEqual({ 'x-nova-app-version': APP_VERSION, 'x-nova-app-version-code': String(APP_VERSION_CODE), authorization: 'Bearer ' + input.accessToken });
     for (const [, init] of fetchMock.mock.calls) { expect(init.method).toBe('GET'); expect(init.body).toBeUndefined(); }
     const socket = FakeSocket.instances[0]!;
     expect(socket.url).toBe('wss://private-gateway.example/nova/v1/chat/stream');
     expect(socket.closed).toBe(true);
     expect(socket.sent.map((frame) => JSON.parse(frame).type)).toEqual(['hello']);
-    expect(JSON.parse(socket.sent[0]!).appVersionCode).toBe(34);
+    expect(JSON.parse(socket.sent[0]!).appVersionCode).toBe(APP_VERSION_CODE);
     const text = formatDiagnosticReport(report, { version: 'test', platform: 'web' });
     for (const secret of [input.accessToken, input.deviceId, 'private-gateway', 'private-model-name']) expect(text).not.toContain(secret);
   });

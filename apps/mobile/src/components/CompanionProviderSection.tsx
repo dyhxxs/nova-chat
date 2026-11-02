@@ -28,7 +28,7 @@ export function CompanionProviderSection({ onBlur }: { onBlur: (callback: () => 
     return () => { ticket.current++; };
   }, [serverUrl, accessToken, purpose]);
   useEffect(() => {
-    const clear = () => { ticket.current++; setForm(value => ({ ...value, apiBaseUrl: '', apiKey: '' })); setModels([]); setModelPicker(false); setModelQuery(''); setBusy(false); };
+    const clear = () => { ticket.current++; setForm(value => ({ ...value, apiKey: '' })); setModels([]); setModelPicker(false); setModelQuery(''); setBusy(false); };
     const sub = AppState.addEventListener('change', value => { if (value !== 'active') clear(); });
     const unsubscribe = onBlur(clear);
     return () => { ticket.current++; sub.remove(); unsubscribe(); };
@@ -59,16 +59,17 @@ export function CompanionProviderSection({ onBlur }: { onBlur: (callback: () => 
     } catch (error) { if (ticket.current === id && valid()) setNotice(friendlyNetworkError(error)); }
     finally { if (ticket.current === id && valid()) setBusy(false); }
   };
-  const input = (key: 'apiBaseUrl' | 'apiKey' | 'defaultModel', title: string, hint: string) => <View style={{ gap: 8 }}><Text style={{ color: theme.colors.text, fontSize: 13 }}>{title}</Text><TextInput accessibilityLabel={`陪伴${purpose === 'chat' ? '文字' : '图片'}${title}`} value={form[key]} onChangeText={value => key === 'defaultModel' ? setForm(current => ({ ...current, [key]: value })) : updateForm({ [key]: value })} editable={!busy} secureTextEntry={key !== 'defaultModel'} autoCapitalize="none" autoCorrect={false} autoComplete="off" textContentType="none" importantForAutofill="no" placeholder={hint} placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]} /></View>;
+  const input = (key: 'apiBaseUrl' | 'apiKey' | 'defaultModel', title: string, hint: string) => <View style={{ gap: 8 }}><Text style={{ color: theme.colors.text, fontSize: 13 }}>{title}</Text><TextInput accessibilityLabel={`陪伴${purpose === 'chat' ? '文字' : '图片'}${title}`} value={form[key]} onChangeText={value => key === 'defaultModel' ? setForm(current => ({ ...current, [key]: value })) : updateForm({ [key]: value })} editable={!busy} secureTextEntry={key === 'apiKey'} autoCapitalize="none" autoCorrect={false} autoComplete="off" textContentType="none" importantForAutofill="no" placeholder={hint} placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, backgroundColor: theme.colors.surfaceMuted, borderColor: theme.colors.border }]} /></View>;
   return <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
     <Text style={{ color: theme.colors.text, fontSize: 19, fontWeight: '600' }}>AI 陪伴专用服务</Text>
     <Text style={{ color: theme.colors.textSecondary, fontSize: 13, lineHeight: 21 }}>陪伴文字由管理员独立指定模型，普通聊天切换模型不会影响它。陪伴照片可使用中转的 image 模型。</Text>
     <View style={styles.options}>{(['chat', 'image'] as const).map(value => <Pressable key={value} disabled={busy} onPress={() => setPurpose(value)} style={[styles.choice, { backgroundColor: value === purpose ? theme.colors.primarySoft : theme.colors.surfaceMuted }]}><Text style={{ color: value === purpose ? theme.colors.primary : theme.colors.textSecondary }}>{value === 'chat' ? '陪伴聊天' : '陪伴照片'}</Text></Pressable>)}</View>
-    {input('apiBaseUrl', '服务地址', form.apiBaseUrlSet ? '已配置；留空保留' : 'https://provider.example.com/v1')}
-    {input('apiKey', 'API Key', form.apiKeySet ? '已配置；留空保留' : '输入该服务的密钥')}
+    {input('apiBaseUrl', '服务地址', 'https://provider.example.com/v1')}
+    {input('apiKey', 'API Key', '输入该服务的密钥（留空保留）')}
+    {form.apiKeyHint ? <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>已保存密钥：{form.apiKeyHint}（留空保持不变）</Text> : null}
     {input('defaultModel', '模型', purpose === 'chat' ? '例如 deepseek-chat' : '例如 gpt-image-1')}
     <Pressable disabled={busy} accessibilityLabel="获取陪伴可用模型" onPress={() => void loadModels()} style={[styles.save, { borderWidth: StyleSheet.hairlineWidth, borderColor: theme.colors.border, opacity: busy ? 0.6 : 1 }]}><Text style={{ color: theme.colors.primary }}>获取可用模型并选择</Text></Pressable>
-    <Text style={{ color: theme.colors.textSecondary, fontSize: 12, lineHeight: 20 }}>填写地址和 Key 后可获取模型；已保存时留空即可使用原配置。模型由管理员选择，用户端不显示。</Text>
+    <Text style={{ color: theme.colors.textSecondary, fontSize: 12, lineHeight: 20 }}>填写地址和 Key 后可获取模型；已保存的地址会显示，密钥仅显示前后几位，留空保留原配置。模型由管理员选择，用户端不显示。</Text>
     {purpose === 'chat' && <View style={styles.options}>{(['chat-completions', 'responses'] as const).map(value => <Pressable key={value} disabled={busy} onPress={() => updateForm({ apiMode: value })} style={[styles.choice, { backgroundColor: value === form.apiMode ? theme.colors.primarySoft : theme.colors.surfaceMuted }]}><Text style={{ color: theme.colors.text, fontSize: 12 }}>{value === 'responses' ? 'Responses' : 'Chat Completions'}</Text></Pressable>)}</View>}
     <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>鉴权方式</Text>
     <View style={styles.options}>{(['bearer', 'api-key', 'none'] as const).map(value => <Pressable key={value} disabled={busy} onPress={() => updateForm({ authMode: value })} style={[styles.choice, { backgroundColor: value === form.authMode ? theme.colors.primarySoft : theme.colors.surfaceMuted }]}><Text style={{ color: theme.colors.text, fontSize: 12 }}>{value === 'none' ? '无鉴权' : value}</Text></Pressable>)}</View>

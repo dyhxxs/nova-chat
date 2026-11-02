@@ -208,10 +208,14 @@ curl https://chat.example.com/health
 Base URL: https://kxai.cc/v1
 Protocol: Responses
 Auth: Bearer
-Default model: gpt-5.6-sol
-Allowed models: gpt-5.6-sol
+Default model: <从“获取模型”结果中选择>
+Allowed models: <同默认模型>
 API Key: <第三方 Key>
 ```
+
+> kxai.cc 是按 Key 返回不同模型池的聚合中转，`/models` 列表取决于所使用的 Key。
+> 不要照抄其它示例里的模型名（如 `gpt-5.6-sol`）：先用“获取模型”拉取该 Key 实际可用的模型，
+> 再从结果里选择默认模型。更换 Key 后必须重新“获取模型”。
 
 6. 保存并点击测试连接。
 7. 普通用户注册登录后直接使用，不需要填写第三方 Key。
@@ -354,7 +358,35 @@ npx eas-cli build --platform ios --profile production
 
 也可在 macOS/Xcode 上本地 Archive。不能在普通 Windows 本机构造一个合法签名的 App Store IPA。
 
-## 14. 分发 APK/IPA
+## 14. 构建并托管网页端（Web）
+
+Nova Chat 同时是一个 React Native Web 应用。网页端可以直接解决苹果用户在没有 IPA 时的使用问题：用 Safari/Chrome 打开即可聊天，不需要 macOS/Xcode 或 Apple Developer 账户。网页端页面自适应手机和电脑宽度，功能与 App 一致，并且与 App 共用同一账户、同一服务器，因此聊天记录、长期记忆（companion memories）、知识库、文件都实时同步。
+
+### 构建网页端静态文件
+
+```powershell
+cd E:\gptapp
+npm run build:web
+```
+
+等价于在 `apps/mobile` 下运行 `npx expo export --platform web --output-dir dist/web --clear`，产物输出到 `apps/mobile/dist/web`（`index.html` + 静态资源）。
+
+### 由网关同源托管
+
+网关通过 `WEB_DIR` 托管网页端。Docker Compose 已经配置为把 `./apps/mobile/dist/web` 只读挂载到容器 `/app/web` 并设置 `WEB_DIR=/app/web`。构建网页端后启动（或重启）网关即可：
+
+```bash
+npm run build:web
+docker compose up -d --build
+```
+
+访问 `http://YOUR_SERVER_IP:8787/` 即可打开网页端。网页端默认同源识别网关地址（`window.location.origin`），登录时无需再填写服务器地址；手机 App 仍按原方式填写根地址。
+
+- 网页端与 App 共用 `http://`（流式为 `ws://`）；取得证书切到 HTTPS 后自动变为 `wss://`，无需改动网页端构建。
+- 网页端由网关静态托管，`/v1/*` API 和 `/v1/chat/stream` WebSocket 路由优先级高于静态页回退，不受影响。
+- 如果想用 CDN/Nginx 单独托管网页端，把 `dist/web` 部署为静态站点并在构建时设置 `EXPO_PUBLIC_GATEWAY_URL=https://chat.example.com` 指向网关即可（此时网关可不设 `WEB_DIR`）。
+
+## 15. 分发 APK/IPA
 
 Android 推荐：Google Play 内部测试、正式轨道或企业 MDM。iOS 推荐 TestFlight/App Store/企业 MDM。
 
@@ -370,11 +402,11 @@ Android 推荐：Google Play 内部测试、正式轨道或企业 MDM。iOS 推�
 
 “下载到 40% 断开”通常来自临时隧道、家用上行带宽、无 Range 简易服务器或链接过期，与 Nova 模型网关部署与否无关。
 
-## 15. 发布检查清单
+## 16. 发布检查清单
 
 - [ ] `npm run build` 和 `npm run verify` 全部通过。`npm run gateway:smoke -- http://127.0.0.1:8787` 通过。
 - [ ] `npx expo-doctor` 通过。
-- [ ] Android/iOS bundle 导出成功。
+- [ ] Android/iOS/Web bundle 导出成功（`npm run build:web` 生成 `apps/mobile/dist/web`）。
 - [ ] Android APK/AAB 签名正确，记录 SHA-256。
 - [ ] iOS 使用正确团队、Bundle ID、证书和 Provisioning Profile。
 - [ ] 已按实际发布模式验证 App 与网关地址：

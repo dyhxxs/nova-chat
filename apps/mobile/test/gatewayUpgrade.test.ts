@@ -14,6 +14,7 @@ vi.mock('expo-secure-store', () => ({
   setItemAsync: vi.fn(async (_key: string, value: string) => { secure.raw = value; }),
   deleteItemAsync: vi.fn(async (key: string) => { if (key === 'nova-chat-session-token') { if (secure.failDelete) throw new Error('delete unavailable'); secure.raw = ''; } }),
 }));
+vi.mock('../src/services/credentialStorage', async () => import('../src/services/credentialStorage.native'));
 import { useAppStore } from '../src/store/useAppStore';
 const state = () => useAppStore.getState();
 const current = 'https://8.8.8.8';

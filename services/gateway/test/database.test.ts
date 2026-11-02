@@ -153,7 +153,7 @@ describe('AppDatabase', () => {
     expect(recreated[0]!.name).toBe('沈知意');
   });
 
-  it('encrypts provider keys at rest and returns only secret-free configuration status', async () => {
+  it('encrypts provider keys at rest and never exposes the full key', async () => {
     const { database, dataDir } = await createDatabase();
     const admin = database.createUser({ email: 'admin@example.com', password: 'a very secure admin password', displayName: 'Admin', role: 'admin' });
     const apiKey = 'third-party-secret-key-should-never-be-plain-text';
@@ -169,10 +169,10 @@ describe('AppDatabase', () => {
 
     expect(database.getProviderSettings().apiKey).toBe(apiKey);
     expect(publicSettings).toMatchObject({ apiKeySet: true, apiBaseUrlSet: true });
-    expect(publicSettings).not.toHaveProperty('apiKeyPreview');
-    expect(publicSettings.apiBaseUrl).toBe('');
-    expect(JSON.stringify(publicSettings)).not.toContain(apiKey.slice(-4));
     expect(publicSettings).not.toHaveProperty('apiKey');
+    expect(publicSettings.apiBaseUrl).toBe('https://provider.example/v1');
+    expect(publicSettings.apiKeyHint).toBe('third-…text');
+    expect(JSON.stringify(publicSettings)).not.toContain(apiKey);
     expect(database.getPublicProviderSettings()).not.toHaveProperty('apiKey');
 
     database.close();

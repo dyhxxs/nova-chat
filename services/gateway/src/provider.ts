@@ -659,7 +659,8 @@ export class ModelProvider {
         return { text, model: 'nova-local-retrieval', knowledge };
       }
     }
-    const imageRequest = !request.companionId && !knowledge && (imageGenerationIntent(request) || isImageModel(request.options.model));
+    const imageRequest = !request.languageLearning && !request.companionId && !knowledge
+      && (imageGenerationIntent(request) || isImageModel(request.options.model));
     if (imageRequest) {
       // Only an explicitly selected image model should override the automatic
       // gpt-image-2 preference. A text model choice must remain unchanged in

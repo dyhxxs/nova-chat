@@ -4,11 +4,13 @@ import { knowledgeDraftInputSchema, type KnowledgeDraft, type KnowledgeDraftInpu
 import { retainedArchiveBytes, type ArchiveCleanupPlan, type StorageOverview } from '../lib/storageMaintenance';
 import { accountScope } from '../lib/accountScope';
 import { mergeAssistantBackup, parseAssistantBackup } from '../lib/assistantBackup';
+import { mergeRemoteConversations, toSyncableConversation } from '../lib/conversationSync';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { credentialStorage } from '../services/credentialStorage';
 import { CredentialStorageError, type CredentialOperation } from '../lib/credentialVault';
 import { snapshotStorage } from '../services/snapshotStorage';
+import { deleteRemoteConversation, listRemoteConversations, putRemoteConversation } from '../services/conversationSyncApi';
 import { create } from 'zustand';
 import { DEFAULT_MODEL_ID, type AttachmentRef, type CompanionEvent, type GeneratedAttachment, type TokenUsage, type KnowledgeResult } from '@nova-chat/protocol';
 import { normalizeServerUrl } from '../lib/connection';
@@ -29,7 +31,18 @@ const SETTINGS_STORAGE_KEY = '@nova-chat/settings/v1';
 const ACCOUNT_STORAGE_PREFIX = '@nova-chat/account/v1/';
 const LEGACY_STORAGE_KEY = '@nova-chat/state/v1';
 const INTERIM_UNSCOPED_STORAGE_KEY = '@nova-chat/state/v2';
-const DEFAULT_GATEWAY_URL = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim() ?? '';
+function defaultGatewayUrl(): string {
+  const builtIn = process.env.EXPO_PUBLIC_GATEWAY_URL?.trim() ?? '';
+  if (builtIn) return builtIn;
+  // Same-origin web: when the gateway itself serves the web client, the page
+  // origin is the gateway URL. Native has no `window`, so this stays '' there
+  // without importing react-native into the store.
+  if (typeof window !== 'undefined' && typeof window.location?.origin === 'string') {
+    return window.location.origin;
+  }
+  return '';
+}
+const DEFAULT_GATEWAY_URL = defaultGatewayUrl();
 
 function sameVoiceMessage(a: VoiceMessage | undefined, b: VoiceMessage): boolean {
   return Boolean(a)
@@ -84,6 +97,10 @@ type PersistedState = {
   activeConversationId: string;
   settings: AppSettings;
   deviceId: string;
+  /** Server sync cursor for incremental conversation pulls. */
+  syncCursor?: number;
+  /** Locally deleted conversation ids awaiting a remote tombstone. */
+  deletedConversationIds?: string[];
 };
 
 type PersistedSettings = {
@@ -128,6 +145,11 @@ type AppState = {
   persistenceError?: string;
   credentialError?: string;
   credentialOperation?: CredentialOperation;
+  syncCursor: number;
+  deletedConversationIds: string[];
+  syncError?: string;
+  syncAccount: () => Promise<void>;
+  pushRemoteChanges: () => Promise<void>;
   retryCredentialPersistence: () => Promise<void>;
   flushPersistence: () => Promise<void>;
   hydrate: () => Promise<void>;
@@ -169,6 +191,13 @@ let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
 let persistenceChain = Promise.resolve();
 let sessionLoadGeneration = 0;
 let tokenPersistenceChain = Promise.resolve();
+// Cross-device sync bookkeeping. `syncedVersions` records the client `updatedAt`
+// value last acknowledged by the server per conversation, so only real changes
+// are pushed. Conversation ids are UUIDs, so the map is naturally account-scoped.
+const syncedVersions = new Map<string, number>();
+let syncPushChain = Promise.resolve();
+let syncDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+let syncAccountInFlight = false;
 function persistToken(token: string, serverUrl: string, generation: number) {
   tokenPersistenceChain = tokenPersistenceChain.catch(() => undefined).then(async () => {
     try {
@@ -203,6 +232,8 @@ function serializable(state: AppState): PersistedState {
     activeConversationId: state.activeConversationId,
     settings: state.settings,
     deviceId: state.deviceId,
+    syncCursor: state.syncCursor,
+    deletedConversationIds: state.deletedConversationIds,
   };
 }
 function persistState(state: AppState) {
@@ -241,6 +272,9 @@ function newLocalState(settings: AppSettings, deviceId = createId()) {
     storageReadBlocked: false,
     recoveryNotice: undefined as string | undefined,
     persistenceError: undefined as string | undefined,
+    syncCursor: 0,
+    deletedConversationIds: [] as string[],
+    syncError: undefined as string | undefined,
     conversations: [conversation],
     activeConversationId: conversation.id,
     settings,
@@ -290,6 +324,8 @@ async function readAccountState(userId: string, serverUrl: string, fallbackSetti
       activeConversationId: conversations.some((item) => item.id === parsed.activeConversationId) ? parsed.activeConversationId! : conversations[0]!.id,
       settings: { ...normalizeSettings(parsed.settings, fallbackSettings), serverUrl },
       deviceId: typeof parsed.deviceId === 'string' && parsed.deviceId.length >= 8 ? parsed.deviceId : fallbackDeviceId,
+      syncCursor: typeof parsed.syncCursor === 'number' && parsed.syncCursor >= 0 ? parsed.syncCursor : 0,
+      deletedConversationIds: Array.isArray(parsed.deletedConversationIds) ? parsed.deletedConversationIds.filter((id): id is string => typeof id === 'string') : [],
       recoveryNotice: restored.repaired ? '检测到损坏的本地记录。已恢复可读取的对话，并保留未经修改的恢复副本；可在数据与备份中导出交给维护者检查。' : undefined,
     };
   } catch {
@@ -322,6 +358,15 @@ function schedulePersistence(state: AppState, immediate = false) {
   };
   if (immediate) save();
   else persistenceTimer = setTimeout(save, 450);
+  if (state.dataOwnerId) scheduleRemoteSync();
+}
+
+function scheduleRemoteSync() {
+  if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(() => {
+    syncDebounceTimer = undefined;
+    void useAppStore.getState().pushRemoteChanges().catch(() => undefined);
+  }, 3000);
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -337,6 +382,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   authStatus: 'unknown',
   user: undefined,
   dataOwnerId: undefined,
+  syncCursor: 0,
+  deletedConversationIds: [],
+  syncError: undefined,
 
   getStorageOverview: async () => {
     const state = get();
@@ -542,6 +590,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       authStatus: 'authenticated',
     });
     await persistState(get()).catch(() => undefined);
+    void get().syncAccount().catch(() => undefined);
   },
 
   forkConversation: (selection) => {
@@ -883,13 +932,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     let conversations = get().conversations.filter((item) => item.id !== id);
     if (!conversations.length) conversations = [freshConversation()];
     const activeConversationId = get().activeConversationId === id ? conversations[0]!.id : get().activeConversationId;
-    set({ conversations, activeConversationId });
+    const deletedConversationIds = get().deletedConversationIds.includes(id) ? get().deletedConversationIds : [...get().deletedConversationIds, id];
+    set({ conversations, activeConversationId, deletedConversationIds });
     schedulePersistence(get(), true);
   },
 
   clearConversations: () => {
     const conversation = freshConversation();
-    set({ conversations: [conversation], activeConversationId: conversation.id });
+    const deletedConversationIds = [...new Set([...get().deletedConversationIds, ...get().conversations.map((item) => item.id)])];
+    set({ conversations: [conversation], activeConversationId: conversation.id, deletedConversationIds });
     schedulePersistence(get(), true);
   },
 
@@ -928,11 +979,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (generation !== sessionLoadGeneration) return;
     set({ ...restored, accessToken: token, user, authStatus: 'authenticated', dataOwnerId: user.id, dataOwnerServerUrl: serverUrl });
     await persistState(get()).catch(() => undefined);
+    void get().syncAccount().catch(() => undefined);
   },
 
   clearSession: async (nextServerUrl) => {
     const generation = ++sessionLoadGeneration;
     if (persistenceTimer) { clearTimeout(persistenceTimer); persistenceTimer = undefined; }
+    if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = undefined; }
+    syncedVersions.clear();
     const current = get();
     // Enqueue the last streaming delta before discarding the visible account.
     if (current.dataOwnerId) void persistState(current).catch(() => undefined);
@@ -955,6 +1009,72 @@ export const useAppStore = create<AppState>((set, get) => ({
     await saved;
   },
 
+  syncAccount: async () => {
+    const state = get();
+    if (state.authStatus !== 'authenticated' || !state.dataOwnerId || !state.accessToken || !state.settings.serverUrl.trim()) return;
+    if (syncAccountInFlight) return;
+    syncAccountInFlight = true;
+    try {
+      const serverUrl = state.settings.serverUrl;
+      const accessToken = state.accessToken;
+      const ownerId = state.dataOwnerId;
+      const local = state.conversations;
+      const locallyDeleted = state.deletedConversationIds;
+      const remote = await listRemoteConversations(serverUrl, accessToken, 0);
+      const current = get();
+      if (current.dataOwnerId !== ownerId || current.accessToken !== accessToken || current.settings.serverUrl !== serverUrl) return;
+      const merged = mergeRemoteConversations(local, locallyDeleted, remote.items);
+      const conversations = merged.conversations.length ? merged.conversations : [freshConversation()];
+      const activeStillExists = conversations.some((item) => item.id === current.activeConversationId);
+      set({
+        conversations,
+        activeConversationId: activeStillExists ? current.activeConversationId : conversations[0]!.id,
+        syncCursor: remote.cursor,
+        deletedConversationIds: merged.deleteIdsToPush,
+        syncError: undefined,
+      });
+      // The merged set now matches the server; only newer changes push back.
+      for (const conversation of conversations) syncedVersions.set(conversation.id, conversation.updatedAt);
+      for (const conversation of merged.needsPush) {
+        await putRemoteConversation(serverUrl, accessToken, toSyncableConversation(conversation))
+          .then(() => syncedVersions.set(conversation.id, conversation.updatedAt))
+          .catch(() => undefined);
+      }
+      await get().pushRemoteChanges();
+    } catch {
+      set({ syncError: '与服务器同步失败，稍后会自动重试。' });
+    } finally {
+      syncAccountInFlight = false;
+    }
+  },
+
+  pushRemoteChanges: async () => {
+    const state = get();
+    if (state.authStatus !== 'authenticated' || !state.dataOwnerId || !state.accessToken || !state.settings.serverUrl.trim()) return;
+    const serverUrl = state.settings.serverUrl;
+    const accessToken = state.accessToken;
+    const ownerId = state.dataOwnerId;
+    syncPushChain = syncPushChain.catch(() => undefined).then(async () => {
+      const current = get();
+      if (current.dataOwnerId !== ownerId || current.accessToken !== accessToken || current.settings.serverUrl !== serverUrl) return;
+      for (const conversation of current.conversations) {
+        if ((syncedVersions.get(conversation.id) ?? -1) >= conversation.updatedAt) continue;
+        try {
+          await putRemoteConversation(serverUrl, accessToken, toSyncableConversation(conversation));
+          syncedVersions.set(conversation.id, conversation.updatedAt);
+        } catch { /* keep dirty for the next pass */ }
+      }
+      const pending = [...get().deletedConversationIds];
+      for (const id of pending) {
+        try {
+          await deleteRemoteConversation(serverUrl, accessToken, id);
+          set({ deletedConversationIds: get().deletedConversationIds.filter((item) => item !== id) });
+        } catch { /* keep pending */ }
+      }
+    });
+    await syncPushChain.catch(() => undefined);
+  },
+
   setAuthState: (authStatus, user) => {
     if (authStatus === 'authenticated' && user && get().dataOwnerId !== user.id) {
       ++sessionLoadGeneration;
@@ -974,6 +1094,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         user,
       });
       schedulePersistence(get(), true);
+      if (get().accessToken) void get().syncAccount().catch(() => undefined);
       return;
     }
     set({ authStatus, user });

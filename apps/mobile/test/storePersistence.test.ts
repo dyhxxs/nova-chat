@@ -14,6 +14,7 @@ vi.mock('expo-secure-store', () => ({
   setItemAsync: vi.fn(async (_key: string, value: string) => { secure.token = value; }),
   deleteItemAsync: vi.fn(async (key: string) => { if (key === 'nova-chat-session-token') secure.token = ''; }),
 }));
+vi.mock('../src/services/credentialStorage', async () => import('../src/services/credentialStorage.native'));
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { useAppStore } from '../src/store/useAppStore';

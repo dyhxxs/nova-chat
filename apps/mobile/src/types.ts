@@ -117,6 +117,7 @@ export type RootStackParamList = {
   Data: undefined;
   Security: undefined;
   Assistants: undefined;
+  LanguageLearning: undefined;
   Companions: { editId?: string } | undefined;
   CompanionConversations: { companionId: string; companionName: string };
   Knowledge: undefined;

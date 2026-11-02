@@ -11,12 +11,16 @@ import { useAppTheme } from '../hooks/useAppTheme';
 import { safeDisplayName } from '../lib/userDisplayName';
 import { friendlyNetworkError } from '../lib/errorMessage';
 import {
-  getProviderSettings, listUsers, saveProviderSettings, testProvider, updateUser,
+  getProviderSettings, getVoiceProviderSettings, listUsers, saveProviderSettings, saveVoiceProviderSettings, testProvider, updateUser,
 } from '../services/gatewayApiClient';
 import { useAppStore } from '../store/useAppStore';
 import type { RootStackParamList, UserProfile } from '../types';
+import type { VoiceProviderAdminSettings } from '../services/gatewayApiClient';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Admin'>;
+
+type VoiceForm = VoiceProviderAdminSettings & { apiKey: string };
+function voiceFormFrom(settings: VoiceProviderAdminSettings): VoiceForm { return { ...settings, apiKey: '' }; }
 
 function Choice<T extends string>({ value, selected, label, onPress }: { value: T; selected: boolean; label: string; onPress: (value: T) => void }) {
   const theme = useAppTheme();
@@ -31,6 +35,7 @@ export function AdminScreen({ navigation }: Props) {
   const currentUser = useAppStore((state) => state.user);
   const updateSettings = useAppStore((state) => state.updateSettings);
   const [form, setForm] = useState<ProviderForm>(emptyProviderForm);
+  const [voiceForm, setVoiceForm] = useState<VoiceForm>({ apiBaseUrl: '', apiBaseUrlSet: false, apiKeySet: false, apiKeyHint: '', ttsModel: 'doubao-tts-2.0', asrModel: 'gem-3.8-flash', defaultVoiceId: '', apiKey: '' });
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -47,7 +52,8 @@ export function AdminScreen({ navigation }: Props) {
     mounted.current = true;
     const clearDraft = () => {
       operation.current++;
-      setForm((item) => ({ ...item, apiBaseUrl: '', apiKey: '' }));
+      setForm((item) => ({ ...item, apiKey: '' }));
+      setVoiceForm((item) => ({ ...item, apiKey: '' }));
       setStatus(undefined);
       setBusy(false);
     };
@@ -59,11 +65,12 @@ export function AdminScreen({ navigation }: Props) {
   const load = useCallback(async () => {
     if (!isCurrentAdmin()) return;
     const ticket = ++operation.current;
-    const [provider, userList] = await Promise.all([
-      getProviderSettings(serverUrl, accessToken), listUsers(serverUrl, accessToken),
+    const [provider, voiceProvider, userList] = await Promise.all([
+      getProviderSettings(serverUrl, accessToken), getVoiceProviderSettings(serverUrl, accessToken), listUsers(serverUrl, accessToken),
     ]);
     if (!isCurrentAdmin() || ticket !== operation.current) return;
     setForm(providerFormFrom(provider));
+    setVoiceForm(voiceFormFrom(voiceProvider));
     setUsers(userList);
   }, [accessToken, isCurrentAdmin, serverUrl]);
 
@@ -112,6 +119,23 @@ export function AdminScreen({ navigation }: Props) {
     finally { if (isCurrentAdmin() && ticket === operation.current) setBusy(false); }
   };
 
+  const saveVoice = async () => {
+    if (!isCurrentAdmin() || busy) return;
+    const ticket = ++operation.current;
+    setBusy(true); setStatus(undefined);
+    try {
+      const saved = await saveVoiceProviderSettings(serverUrl, accessToken, {
+        ...(voiceForm.apiBaseUrl.trim() ? { apiBaseUrl: voiceForm.apiBaseUrl.trim() } : {}),
+        ...(voiceForm.apiKey.trim() ? { apiKey: voiceForm.apiKey.trim() } : {}),
+        ttsModel: voiceForm.ttsModel.trim(), asrModel: voiceForm.asrModel.trim(), defaultVoiceId: voiceForm.defaultVoiceId.trim(),
+      });
+      if (!isCurrentAdmin() || ticket !== operation.current) return;
+      setVoiceForm(voiceFormFrom(saved));
+      setStatus('语音服务配置已保存。密钥只保存在网关，留空可保留现有密钥。');
+    } catch (error) { if (isCurrentAdmin() && ticket === operation.current) setStatus(friendlyNetworkError(error)); }
+    finally { if (isCurrentAdmin() && ticket === operation.current) setBusy(false); }
+  };
+
   const changeUser = async (user: UserProfile, patch: Partial<Pick<UserProfile, 'role' | 'disabled'>>) => {
     try {
       const updated = await updateUser(serverUrl, accessToken, user.id, patch);
@@ -124,13 +148,14 @@ export function AdminScreen({ navigation }: Props) {
     <KeyboardAwareView style={[styles.root, { backgroundColor: theme.colors.background }]}>
     <ScrollView style={styles.scroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} tintColor={theme.colors.primary} />}>
       <CompanionProviderSection onBlur={subscribeBlur} />
-      <Text style={[styles.intro, { color: theme.colors.textSecondary }]}>第三方地址和密钥只写入网关，保存后不再回显，管理员也无法查看原值或密钥尾号。已配置时留空即可保留；更换地址必须同时填写新的密钥。</Text>
+      <Text style={[styles.intro, { color: theme.colors.textSecondary }]}>已保存的地址会显示；密钥只显示前后几位用于辨认，完整密钥不离开网关。留空可保留原配置；更换地址必须同时填写新的密钥。</Text>
       <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
         <View style={styles.cardTitleRow}><Ionicons name="server-outline" size={20} color={theme.colors.primary} /><Text style={[styles.cardTitle, { color: theme.colors.text }]}>普通聊天模型服务</Text></View>
         <Text style={[styles.label, { color: theme.colors.text }]}>API Base URL</Text>
-        <TextInput accessibilityLabel="第三方地址（只写）" editable={!busy && !refreshing} secureTextEntry autoComplete="off" textContentType="none" importantForAutofill="no" value={form.apiBaseUrl} onChangeText={(apiBaseUrl) => setForm((item) => ({ ...item, apiBaseUrl }))} autoCapitalize="none" autoCorrect={false} placeholder={form.apiBaseUrlSet ? '已配置并隐藏；留空保持不变' : '填写第三方服务地址'} placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        <TextInput accessibilityLabel="第三方地址" editable={!busy && !refreshing} autoComplete="off" textContentType="none" importantForAutofill="no" value={form.apiBaseUrl} onChangeText={(apiBaseUrl) => setForm((item) => ({ ...item, apiBaseUrl }))} autoCapitalize="none" autoCorrect={false} placeholder="填写第三方服务地址" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
         <Text style={[styles.label, { color: theme.colors.text }]}>API Key</Text>
-        <TextInput accessibilityLabel="第三方密钥（只写）" editable={!busy && !refreshing} autoCorrect={false} autoComplete="off" textContentType="none" importantForAutofill="no" value={form.apiKey} onChangeText={(apiKey) => setForm((item) => ({ ...item, apiKey }))} secureTextEntry autoCapitalize="none" placeholder={form.apiKeySet ? '已配置并隐藏；留空保持不变' : '填写服务商 API Key'} placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        <TextInput accessibilityLabel="第三方密钥" editable={!busy && !refreshing} autoCorrect={false} autoComplete="off" textContentType="none" importantForAutofill="no" value={form.apiKey} onChangeText={(apiKey) => setForm((item) => ({ ...item, apiKey }))} secureTextEntry autoCapitalize="none" placeholder="填写服务商 API Key（留空保持不变）" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        {form.apiKeyHint ? <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>已保存密钥：{form.apiKeyHint}（留空保持不变）</Text> : null}
         <Text style={[styles.label, { color: theme.colors.text }]}>协议</Text>
         <View style={styles.choices}><Choice value="responses" label="Responses（文件与工具）" selected={form.apiMode === 'responses'} onPress={(apiMode) => setForm((item) => ({ ...item, apiMode }))} /><Choice value="chat-completions" label="Chat Completions" selected={form.apiMode === 'chat-completions'} onPress={(apiMode) => setForm((item) => ({ ...item, apiMode }))} /></View>
         <Text style={[styles.label, { color: theme.colors.text }]}>鉴权方式</Text>
@@ -141,6 +166,23 @@ export function AdminScreen({ navigation }: Props) {
         <TextInput value={form.allowedModels} onChangeText={(allowedModels) => setForm((item) => ({ ...item, allowedModels }))} multiline autoCapitalize="none" autoCorrect={false} placeholder="gpt-5.6-sol, gpt-5.6-terra" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, styles.multiline, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
         {!!status && <Text style={[styles.status, { color: theme.colors.textSecondary }]}>{status}</Text>}
         <View style={styles.buttons}><Pressable onPress={() => void save()} disabled={busy} style={[styles.primary, { backgroundColor: theme.colors.primary }]}><Ionicons name="save-outline" size={17} color="#fff" /><Text style={styles.primaryText}>保存</Text></Pressable><Pressable onPress={() => void test()} disabled={busy} style={[styles.secondary, { borderColor: theme.colors.border }]}><Ionicons name="pulse-outline" size={17} color={theme.colors.text} /><Text style={[styles.secondaryText, { color: theme.colors.text }]}>获取模型</Text></Pressable></View>
+      </View>
+
+      <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
+        <View style={styles.cardTitleRow}><Ionicons name="volume-high-outline" size={20} color={theme.colors.primary} /><Text style={[styles.cardTitle, { color: theme.colors.text }]}>语言学习语音服务</Text></View>
+        <Text style={[styles.status, { color: theme.colors.textSecondary }]}>粤语和英语学习共用此语音中转。后续更换服务商时只需修改这里；密钥留空表示继续使用当前密钥。</Text>
+        <Text style={[styles.label, { color: theme.colors.text }]}>API Base URL</Text>
+        <TextInput accessibilityLabel="语音服务地址" editable={!busy && !refreshing} value={voiceForm.apiBaseUrl} onChangeText={(apiBaseUrl) => setVoiceForm((item) => ({ ...item, apiBaseUrl }))} autoCapitalize="none" autoCorrect={false} placeholder="例如 https://api.example.com/v1" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        <Text style={[styles.label, { color: theme.colors.text }]}>API Key</Text>
+        <TextInput accessibilityLabel="语音服务密钥" editable={!busy && !refreshing} value={voiceForm.apiKey} onChangeText={(apiKey) => setVoiceForm((item) => ({ ...item, apiKey }))} secureTextEntry autoCapitalize="none" autoCorrect={false} placeholder="填写新密钥（留空保持不变）" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        {voiceForm.apiKeyHint ? <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>已保存密钥：{voiceForm.apiKeyHint}</Text> : null}
+        <Text style={[styles.label, { color: theme.colors.text }]}>TTS 模型</Text>
+        <TextInput value={voiceForm.ttsModel} onChangeText={(ttsModel) => setVoiceForm((item) => ({ ...item, ttsModel }))} autoCapitalize="none" autoCorrect={false} placeholder="doubao-tts-2.0" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        <Text style={[styles.label, { color: theme.colors.text }]}>ASR 模型</Text>
+        <TextInput value={voiceForm.asrModel} onChangeText={(asrModel) => setVoiceForm((item) => ({ ...item, asrModel }))} autoCapitalize="none" autoCorrect={false} placeholder="gem-3.8-flash" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        <Text style={[styles.label, { color: theme.colors.text }]}>默认音色 ID</Text>
+        <TextInput value={voiceForm.defaultVoiceId} onChangeText={(defaultVoiceId) => setVoiceForm((item) => ({ ...item, defaultVoiceId }))} autoCapitalize="none" autoCorrect={false} placeholder="zh_female_vv_uranus_bigtts" placeholderTextColor={theme.colors.textTertiary} style={[styles.input, { color: theme.colors.text, borderColor: theme.colors.border, backgroundColor: theme.colors.surfaceMuted }]} />
+        <Pressable onPress={() => void saveVoice()} disabled={busy} style={[styles.primary, { backgroundColor: theme.colors.primary, marginTop: 14 }]}><Ionicons name="save-outline" size={17} color="#fff" /><Text style={styles.primaryText}>保存语音配置</Text></Pressable>
       </View>
 
       <View style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>

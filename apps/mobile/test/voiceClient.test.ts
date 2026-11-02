@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  upload: vi.fn(),
+  bytes: vi.fn(async () => new Uint8Array([1, 2, 3])),
   requestJson: vi.fn(),
 }));
 
@@ -10,9 +10,9 @@ vi.mock('expo-file-system', () => {
   class File {
     readonly exists = true;
     constructor(readonly uri: string) {}
-    upload = mocks.upload;
+    bytes = mocks.bytes;
   }
-  return { File, UploadType: { MULTIPART: 'multipart' } };
+  return { File };
 });
 vi.mock('../src/services/gatewayApiClient', () => {
   class FakeGatewayApiError extends Error {
@@ -21,10 +21,6 @@ vi.mock('../src/services/gatewayApiClient', () => {
   return {
     GatewayApiError: FakeGatewayApiError,
     requestJson: mocks.requestJson,
-    parseUploadJson: (_serverUrl: string, status: number, body: string) => {
-      if (status < 200 || status >= 300) throw new Error('upload failed');
-      return JSON.parse(body);
-    },
   };
 });
 
@@ -36,13 +32,13 @@ const fileId = '22222222-2222-4222-8222-222222222222';
 describe('voice upload', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.upload.mockResolvedValue({
-      status: 200,
-      body: JSON.stringify({ text: '你好，今天怎么样？', voice: { status: 'ready', requestId, durationMs: 2400, fileId } }),
+    mocks.requestJson.mockResolvedValue({
+      text: '你好，今天怎么样？',
+      voice: { status: 'ready', requestId, durationMs: 2400, fileId },
     });
   });
 
-  it('uses the native multipart file uploader for Android recordings', async () => {
+  it('uses a real Blob multipart payload for Android recordings', async () => {
     const result = await uploadVoice('https://gateway.test', 'session-secret', {
       uri: 'file:///data/user/0/com.novachat.mobile/cache/recording.m4a',
       mimeType: 'audio/mp4',
@@ -51,14 +47,23 @@ describe('voice upload', () => {
     });
 
     expect(result.text).toBe('你好，今天怎么样？');
-    expect(mocks.requestJson).not.toHaveBeenCalled();
-    expect(mocks.upload).toHaveBeenCalledWith('https://gateway.test/v1/voice/messages/' + requestId + '?durationMs=2400', expect.objectContaining({
-      httpMethod: 'POST',
-      uploadType: 'multipart',
-      fieldName: 'file',
-      mimeType: 'audio/mp4',
-      headers: expect.objectContaining({ authorization: 'Bearer session-secret', 'x-nova-app-version': '1.1.32', 'x-nova-app-version-code': '34' }),
-      sessionType: 'foreground',
+    expect(mocks.requestJson).toHaveBeenCalledWith('https://gateway.test', '/v1/voice/messages/' + requestId + '?durationMs=2400', expect.objectContaining({
+      method: 'POST', body: expect.any(FormData), accessToken: 'session-secret', timeoutMs: 120_000,
     }));
+    const call = mocks.requestJson.mock.calls[0];
+    expect(call).toBeDefined();
+    const body = call![2].body as FormData;
+    expect(body.get('file')).toBeInstanceOf(Blob);
+  });
+
+  it('passes the selected learning language to the speech recognizer', async () => {
+    await uploadVoice('https://gateway.test', 'session-secret', {
+      uri: 'file:///data/user/0/com.novachat.mobile/cache/recording.m4a',
+      mimeType: 'audio/mp4',
+      durationMs: 2400,
+      requestId,
+    }, undefined, 'cantonese');
+
+    expect(mocks.requestJson).toHaveBeenCalledWith('https://gateway.test', '/v1/voice/messages/' + requestId + '?durationMs=2400&languageId=cantonese', expect.anything());
   });
 });

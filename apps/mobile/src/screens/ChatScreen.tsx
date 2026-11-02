@@ -89,6 +89,10 @@ function attachmentValidationError(name: string, _mimeType: string, size?: numbe
 export function ChatScreen({ navigation }: Props) {
   const speech = useReadAloud();
   const theme = useAppTheme();
+  // The desktop web layout already exposes this route in its sidebar. Keeping
+  // the header affordance on web as well also covers narrow in-app browsers
+  // whose viewport width is not available during the first render.
+  const showWebLanguage = Platform.OS === 'web';
   const listRef = useRef<FlatList>(null);
   const scrollTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const autoFollow = useRef(true);
@@ -292,11 +296,12 @@ export function ChatScreen({ navigation }: Props) {
           <IconButton name="search-outline" accessibilityLabel="搜索聊天记录" onPress={() => { Keyboard.dismiss(); setRecordsVisible(true); }} />
           <IconButton name="add-outline" accessibilityLabel="新建对话" onPress={() => { if (companion && conversation?.companionId) useAppStore.getState().newCompanionConversation(conversation.companionId, companionProfile?.name || conversation.companionName || 'TA'); else newConversation(); void Haptics.selectionAsync(); }} />
           <IconButton name={companion ? "person-outline" : "heart-outline"} accessibilityLabel={companion ? "角色与长相设置" : "打开 AI 陪伴"} onPress={() => navigation.navigate('Companions', companion ? { editId: conversation?.companionId } : undefined)} />
+          {showWebLanguage && !companion && <IconButton name="language-outline" accessibilityLabel="打开语言学习" onPress={() => navigation.navigate('LanguageLearning')} />}
           {!companion && <IconButton name="settings-outline" accessibilityLabel="打开设置" onPress={() => navigation.navigate('Settings')} />}
         </View>
       ),
     });
-  }, [companion, companionProfile?.name, generating, conversation?.companionId, connectionStatus, conversation?.companionName, conversation?.kind, conversation?.title, navigation, newConversation, openOptions, settings.model, theme.colors.danger, theme.colors.success, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary, theme.colors.warning, theme.fonts.bold, theme.fonts.medium, theme.fonts.regular]);
+  }, [companion, companionProfile?.name, generating, conversation?.companionId, connectionStatus, conversation?.companionName, conversation?.kind, conversation?.title, navigation, newConversation, openOptions, settings.model, showWebLanguage, theme.colors.danger, theme.colors.success, theme.colors.text, theme.colors.textSecondary, theme.colors.textTertiary, theme.colors.warning, theme.fonts.bold, theme.fonts.medium, theme.fonts.regular]);
 
   const runGeneration = useCallback((conversationId: string, assistantMessageId: string): boolean => {
     const currentState = useAppStore.getState();
@@ -848,6 +853,7 @@ export function ChatScreen({ navigation }: Props) {
         </View> : <EmptyState
           onTakePhoto={() => { void takePhoto(); }}
           onSuggestion={(prompt) => { useAppStore.getState().setConversationDraft(conversation.id, prompt); }}
+          onLanguageLearning={() => navigation.navigate('LanguageLearning')}
         />
       ) : (
         <FlatList
@@ -882,7 +888,7 @@ export function ChatScreen({ navigation }: Props) {
           )}
           contentContainerStyle={styles.listContent}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+          keyboardDismissMode={Platform.OS === 'web' ? 'none' : Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
           onScroll={onScroll}
           scrollEventThrottle={80}
           onContentSizeChange={() => { scheduleScrollToBottom(false); }}

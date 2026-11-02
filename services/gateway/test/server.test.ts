@@ -354,10 +354,10 @@ describe('gateway server', () => {
     expect(fetched.body).not.toContain(apiKey);
     expect(fetched.json().provider).not.toHaveProperty('apiKey');
     for (const response of [updated, fetched]) {
-      expect(response.body).not.toContain('provider.example');
-      expect(response.body).not.toContain('9876');
-      expect(response.json().provider.apiBaseUrl).toBe('');
-      expect(response.json().provider).not.toHaveProperty('apiKeyPreview');
+      expect(response.body).not.toContain(apiKey);
+      expect(response.json().provider).not.toHaveProperty('apiKey');
+      expect(response.json().provider.apiBaseUrl).toBe('https://provider.example/v1');
+      expect(response.json().provider.apiKeyHint).toBe('provid…9876');
     }
 
     const models = await app.inject({ method: 'GET', url: '/v1/models', headers: bearer(user.accessToken) });

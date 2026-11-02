@@ -2,7 +2,7 @@
   "expo": {
     "name": "Nova Chat",
     "slug": "nova-chat",
-    "version": "1.1.32",
+    "version": "1.1.38",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -16,7 +16,7 @@
           "NSAllowsLocalNetworking": true
         }
       },
-      "buildNumber": "34"
+      "buildNumber": "40"
     },
     "android": {
       "package": "com.novachat.mobile",
@@ -32,7 +32,7 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
-      "versionCode": 34,
+      "versionCode": 40,
       "softwareKeyboardLayoutMode": "resize",
       "allowBackup": false
     },

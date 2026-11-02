@@ -1,6 +1,6 @@
 {
   "name": "nova-chat",
-  "version": "1.1.32",
+  "version": "1.1.38",
   "private": true,
   "description": "Characterful AI companions and a capable everyday assistant, with customizable personas, character photos, multi-model chat and a self-hosted gateway.",
   "repository": {
@@ -39,6 +39,7 @@
     "predev:mobile": "npm run build -w @nova-chat/protocol",
     "dev:mobile": "npm run start -w @nova-chat/mobile",
     "build": "npm run build -w @nova-chat/protocol && npm run build -w @nova-chat/gateway",
+    "build:web": "npm run export:web -w @nova-chat/mobile",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",

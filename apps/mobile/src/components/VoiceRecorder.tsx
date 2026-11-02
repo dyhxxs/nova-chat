@@ -9,9 +9,17 @@ import { useAppTheme } from '../hooks/useAppTheme';
 import { createId } from '../lib/id';
 import type { RecordedVoice } from '../lib/voice';
 
-type Props = { active: boolean; disabled: boolean; onRecordStart: () => void; onRecorded: (recording: RecordedVoice, asText: boolean) => Promise<boolean> };
+type Props = {
+  active: boolean;
+  disabled: boolean;
+  onRecordStart: () => void;
+  onRecorded: (recording: RecordedVoice, asText: boolean) => Promise<boolean>;
+  /** Language learning always sends the transcript into the coach. */
+  transcribeOnly?: boolean;
+  showModeToggle?: boolean;
+};
 function discard(uri?: string | null) { if (!uri) return; try { if (Platform.OS === 'web') URL.revokeObjectURL(uri); else new File(uri).delete(); } catch { /* OS may already have cleared cache. */ } }
-export function VoiceRecorder({ active, disabled, onRecordStart, onRecorded }: Props) {
+export function VoiceRecorder({ active, disabled, onRecordStart, onRecorded, transcribeOnly = false, showModeToggle = true }: Props) {
   const theme = useAppTheme();
   const recorder = useAudioRecorder({ ...RecordingPresets.HIGH_QUALITY, isMeteringEnabled: true });
   const state = useAudioRecorderState(recorder, 100);
@@ -25,7 +33,7 @@ export function VoiceRecorder({ active, disabled, onRecordStart, onRecorded }: P
     sendingRef.current = true;
     setPhase('sending'); setError('');
     try {
-      const accepted = await onRecorded(recording, asText);
+      const accepted = await onRecorded(recording, transcribeOnly || asText);
       if (!alive.current) { discard(recording.uri); draftRef.current = undefined; return; }
       if (accepted) { discard(recording.uri); draftRef.current = undefined; setDraft(undefined); }
       else { setDraft(recording); setError('没有发送成功，录音已保留，可以重试。'); }
@@ -139,6 +147,7 @@ export function VoiceRecorder({ active, disabled, onRecordStart, onRecorded }: P
       }
     }
   };
+  const webRecorder = Platform.OS === 'web';
   const seconds = Math.max(1, Math.ceil(state.durationMillis / 1000));
   return <View style={{ flex: 1 }}>
     {(phase === 'recording' || phase === 'preparing') && <View style={[styles.indicator, { backgroundColor: cancel ? '#B33C47' : '#26342E' }]}>
@@ -153,22 +162,26 @@ export function VoiceRecorder({ active, disabled, onRecordStart, onRecorded }: P
         <Pressable disabled={phase === 'sending'} onPress={() => { discard(draft.uri); draftRef.current = undefined; setDraft(undefined); setError(''); }} accessibilityLabel="丢弃录音" style={styles.action}><Text style={{ color: theme.colors.textSecondary }}>丢弃</Text></Pressable>
         <Pressable disabled={phase === 'sending' || disabled} onPress={() => { void send(draft); }} accessibilityLabel="重试发送录音" style={styles.action}><Text style={{ color: theme.colors.primary }}>重试</Text></Pressable>
       </View>
-    </View> : <Pressable accessibilityRole="button" accessibilityLabel={asText ? '按住说话转文字' : '按住说话发送语音'}
-      onPressIn={event => { void begin(event.nativeEvent.pageY); }}
+    </View> : <Pressable accessibilityRole="button" accessibilityLabel={transcribeOnly || asText ? '按住说话转文字' : '按住说话发送语音'}
+      onPressIn={webRecorder ? undefined : event => { void begin(event.nativeEvent.pageY); }}
       onTouchMove={event => { const next = initialY.current - event.nativeEvent.pageY > 70; cancelRef.current = next; setCancel(next); }}
-      onPressOut={() => { void finishRef.current(); }}
+      onPressOut={webRecorder ? undefined : () => { void finishRef.current(); }}
       onTouchCancel={abort}
+      onTouchStart={webRecorder ? event => { void begin(event.nativeEvent.pageY); } : undefined}
+      onTouchEnd={webRecorder ? () => { void finishRef.current(cancelRef.current); } : undefined}
       // Keep responder fallbacks for Android builds that bypass Pressability;
       // held/finishing refs make duplicate callbacks harmless.
-      onResponderGrant={event => { void begin(event.nativeEvent.pageY); }}
-      onResponderMove={event => { const next = initialY.current - event.nativeEvent.pageY > 70; cancelRef.current = next; setCancel(next); }}
-      onResponderRelease={() => { void finishRef.current(); }}
-      onResponderTerminationRequest={() => false}
-      onResponderTerminate={abort}
+      onResponderGrant={webRecorder ? undefined : event => { void begin(event.nativeEvent.pageY); }}
+      onResponderMove={webRecorder ? undefined : event => { const next = initialY.current - event.nativeEvent.pageY > 70; cancelRef.current = next; setCancel(next); }}
+      onResponderRelease={webRecorder ? undefined : () => { void finishRef.current(); }}
+      onResponderTerminationRequest={webRecorder ? undefined : () => false}
+      onResponderTerminate={webRecorder ? undefined : abort}
+      cancelable={false}
+      pressRetentionOffset={webRecorder ? undefined : { top: 100, bottom: 100, left: 100, right: 100 }}
       style={({ pressed }) => [styles.hold, { backgroundColor: phase === 'recording' ? theme.colors.surfaceMuted : 'transparent', opacity: disabled ? 0.45 : 1 }, pressed && { opacity: 0.78 }]}>
-      <Text style={{ color: theme.colors.text, fontSize: 15, fontWeight: '600' }}>{phase === 'preparing' ? '正在准备…' : phase === 'recording' ? cancel ? '松开取消' : '松开发送 · 上滑取消' : asText ? '按住说话转文字' : '按住说话'}</Text>
+      <Text style={{ color: theme.colors.text, fontSize: 15, fontWeight: '600' }}>{phase === 'preparing' ? '正在准备…' : phase === 'recording' ? cancel ? '松开取消' : '松开发送 · 上滑取消' : transcribeOnly || asText ? '按住说话转文字' : '按住说话'}</Text>
     </Pressable>}
-    {!draft && phase === 'idle' && <Pressable onPress={() => setAsText(value => !value)} accessibilityLabel="切换语音和语音转文字" style={{ alignItems: 'center', paddingVertical: 4 }}><Text style={{ color: theme.colors.textTertiary, fontSize: 10 }}>{asText ? '转成文字后可编辑 · 切换语音消息' : '发送语音消息 · 切换语音转文字'}</Text></Pressable>}
+    {!draft && phase === 'idle' && showModeToggle && <Pressable onPress={() => setAsText(value => !value)} accessibilityLabel="切换语音和语音转文字" style={{ alignItems: 'center', paddingVertical: 4 }}><Text style={{ color: theme.colors.textTertiary, fontSize: 10 }}>{asText ? '转成文字后可编辑 · 切换语音消息' : '发送语音消息 · 切换语音转文字'}</Text></Pressable>}
     {!!error && !draft && <Text style={{ color: theme.colors.danger, fontSize: 11 }}>{error}</Text>}
   </View>;
 }

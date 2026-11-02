@@ -29,6 +29,10 @@ Edit personality, speaking style, user-approved memory and appearance to make yo
 
 Upload a reference photo in the character's appearance settings, then ask for a photo during a chat. Subsequent images reuse the reference face to help maintain the character's appearance. Photo generation requires a compatible image provider, and visual consistency depends on that provider.
 
+### Interactive language learning
+
+The Language Learning area currently teaches Cantonese and English, with more languages able to share the same catalog later. Learners can switch between conversation, translation and pronunciation practice. Each turn can include the target-language answer, Chinese meaning, correction, Cantonese Jyutping or English IPA guidance, one lesson point and a next exercise. Replies can be played manually or read automatically through the voice relay configured by an administrator.
+
 ### A useful everyday assistant
 
 | Feature | What you can do |
@@ -44,7 +48,7 @@ Text-to-speech uses the device or browser speech service and may require a netwo
 
 ### Three independent provider configurations
 
-Administrators can configure regular chat, companion chat and companion images separately. Discover models, select one and save the configuration. Saved provider addresses and API keys are write-only in the administrator UI; ordinary users simply sign in.
+Administrators can configure regular chat, companion chat and companion images separately. Discover models, select one and save the configuration. The administrator UI shows the saved base URL in full plus a masked key hint (`first6…last4`) so you can tell which key is stored, while the full API key never leaves the gateway; ordinary users simply sign in.
 
 ## Current version
 

@@ -2,7 +2,7 @@ import { VoiceRecorder } from './VoiceRecorder';
 import { VoicePreferencesPanel } from './VoicePreferencesPanel';
 import type { RecordedVoice, VoicePreferences } from '../lib/voice';
 import { useCallback, useRef, useState, type ComponentProps } from 'react';
-import { Keyboard, ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Keyboard, ActivityIndicator, Image, Platform, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { ThemedText as Text } from './ThemedText';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -346,6 +346,20 @@ export function Composer({
           returnKeyType="send"
           enterKeyHint="send"
           submitBehavior="submit"
+          onKeyPress={(event) => {
+            // react-native-web renders a multiline input as a <textarea>, where
+            // Enter inserts a newline and onSubmitEditing never fires. Send on
+            // Enter (Shift+Enter for a newline) explicitly on web; native keeps
+            // the submitBehavior/submit + onSubmitEditing path above.
+            if (Platform.OS !== 'web') return;
+            const anyEvent = event as unknown as { key?: string; shiftKey?: boolean; nativeEvent?: { key?: string; shiftKey?: boolean } };
+            const key = anyEvent.key ?? anyEvent.nativeEvent?.key;
+            const shiftKey = anyEvent.shiftKey ?? anyEvent.nativeEvent?.shiftKey;
+            if (key === 'Enter' && !shiftKey) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
           onSubmitEditing={() => { void submit(); }}
         />}
         {generating && !companion && (
